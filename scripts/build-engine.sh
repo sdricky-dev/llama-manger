@@ -1,12 +1,35 @@
 #!/bin/bash
 # 重建 llama.cpp 引擎（server + cli + fit-params + bench）。
 # 用法: ./scripts/build-engine.sh [llama.cpp 仓库路径]
+#   仓库路径默认取 $LLAMA_CPP_DIR，其次 ~/llama.cpp，再其次 ~/Documents/GitHub/llama.cpp。
 set -euo pipefail
 
-REPO="${1:-/Users/Ricky/Documents/GitHub/llama.cpp}"
+# 允许用环境变量指定 cmake/ninja 所在目录（例如某个 venv 里装的 cmake）
+if [ -n "${LLAMA_CMAKE_BIN:-}" ]; then
+  export PATH="$LLAMA_CMAKE_BIN:$PATH"
+fi
 
-# cmake/ninja 不在默认 PATH 中，从 Strata-Mac venv 取
-export PATH="/Users/Ricky/Documents/GitHub/Strata-Mac/.venv/lib/python3.12/site-packages/cmake/data/bin:/Users/Ricky/Documents/GitHub/Strata-Mac/.venv/bin:$PATH"
+for d in "$HOME/llama.cpp" "$HOME/Documents/GitHub/llama.cpp"; do
+  if [ -z "${1:-}" ] && [ -z "${LLAMA_CPP_DIR:-}" ] && [ -d "$d" ]; then
+    DEFAULT_REPO="$d"
+    break
+  fi
+done
+REPO="${1:-${LLAMA_CPP_DIR:-${DEFAULT_REPO:-$HOME/llama.cpp}}}"
+
+command -v cmake >/dev/null 2>&1 || {
+  echo "缺少 cmake。macOS: brew install cmake ninja；或设 LLAMA_CMAKE_BIN=<cmake 所在目录>" >&2
+  exit 1
+}
+command -v ninja >/dev/null 2>&1 || {
+  echo "缺少 ninja。macOS: brew install ninja" >&2
+  exit 1
+}
+[ -d "$REPO" ] || {
+  echo "找不到 llama.cpp 仓库：$REPO" >&2
+  echo "用法: $0 /path/to/llama.cpp（或用环境变量 LLAMA_CPP_DIR 指定）" >&2
+  exit 1
+}
 
 cd "$REPO"
 

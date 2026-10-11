@@ -43,11 +43,25 @@ npm start
 
 ### 依赖的引擎
 
-本应用不含 llama.cpp 二进制，使用你仓库中的构建产物（默认探测 `~/GitHub/llama.cpp/build`，可在「llama.cpp build 目录」输入框指定）：
+本应用**不含 llama.cpp 二进制**，用你本地已有的构建产物（默认探测 `~/llama.cpp/build`、`~/Documents/GitHub/llama.cpp/build`，也可在「llama.cpp build 目录」输入框指定）：
 
 ```bash
-./scripts/build-engine.sh [仓库路径]
-# = cmake（LLAMA_BUILD_SERVER=ON, LLAMA_BUILD_UI=ON）+ ninja 构建 llama-cli / llama-server / llama-fit-params
+./scripts/build-engine.sh                        # 自动探测仓库位置
+./scripts/build-engine.sh /path/to/llama.cpp     # 或显式指定
+LLAMA_CPP_DIR=/path/to/llama.cpp ./scripts/build-engine.sh
+# = cmake（LLAMA_BUILD_SERVER=ON, LLAMA_BUILD_UI=ON）+ ninja → llama-cli / llama-server / llama-fit-params / llama-bench
+```
+
+需要 `cmake` 与 `ninja`（macOS：`brew install cmake ninja`）。若你的 cmake/ninja 装在非默认位置（例如某个 venv 里），用 `LLAMA_CMAKE_BIN=<目录>` 指给脚本：
+
+```bash
+LLAMA_CMAKE_BIN=~/.venv/bin ./scripts/build-engine.sh ~/llama.cpp
+```
+
+Windows 用 PowerShell 脚本（同样需要 `cmake` / `ninja` 在 PATH 中）：
+
+```powershell
+.\scripts\build-engine.ps1
 ```
 
 ### 判决(decision)模型兼容补丁（可选）
