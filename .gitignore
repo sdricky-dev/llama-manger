@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# electron-builder 产物
+dist/
+out/
+release/
+
+# 日志
+*.log
+npm-debug.log*
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# 本地配置与机密（settings.json 实际存放在系统 userData 目录，这里再挡一层）
+settings.json
+.env
+.env.*
+*.pem
+*.key

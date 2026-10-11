@@ -1,0 +1,23 @@
+diff --git a/common/common.cpp b/common/common.cpp
+index 9a71a33ff..b220ee076 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1174,7 +1174,18 @@ static const std::map<common_decision_type, std::string> COMMON_DECISION_TYPE_NA
+     { COMMON_DECISION_TYPE_LFM2_D1_OMNI,   "lfm2-d1-omni"  },
+ };
+ 
++// 兼容别名：某些第三方导出的 GGUF 使用旧/变体类型名。
++// "jev" 与 "openjev" 的 decision 元数据结构完全一致（systemone 模板 +
++// temperature/verbalizer_ids/bias.{noul,score,choice}），因此按同义处理。
++static const std::map<std::string, common_decision_type> COMMON_DECISION_TYPE_ALIASES = {
++    { "jev", COMMON_DECISION_TYPE_OPENJEV },
++};
++
+ static common_decision_type common_decision_type_from_string(const std::string & str) {
++    const auto it = COMMON_DECISION_TYPE_ALIASES.find(str);
++    if (it != COMMON_DECISION_TYPE_ALIASES.end()) {
++        return it->second;
++    }
+     for (const auto & pair : COMMON_DECISION_TYPE_NAMES) {
+         if (pair.second == str) {
+             return pair.first;

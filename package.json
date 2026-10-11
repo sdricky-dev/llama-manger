@@ -1,0 +1,57 @@
+{
+  "name": "llamamanger",
+  "productName": "LlamaManger",
+  "version": "0.1.0",
+  "description": "llama.cpp 一键启动器：硬件感知配置生成、内存估算与换算、引擎启动（llama-cli / llama-server）",
+  "main": "main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/",
+    "pack:mac": "electron-builder --mac",
+    "pack:win": "electron-builder --win",
+    "pack:linux": "electron-builder --linux",
+    "pack": "electron-builder --mac --win --linux"
+  },
+  "author": "Ricky",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.llamamanger.launcher",
+    "productName": "LlamaManger",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main/**/*",
+      "renderer/**/*",
+      "shared/**/*",
+      "preload.js",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
+    }
+  }
+}

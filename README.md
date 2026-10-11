@@ -1,0 +1,206 @@
+# LlamaManger 🦙
+
+llama.cpp 一键启动器（Electron 桌面应用）。
+
+选一个 `.gguf` 模型 → 点 **⚡ 一键生成配置** → 应用根据你的**本机硬件**（Apple Silicon / 内存 / GPU）和**模型架构**（GGUF 元数据：层数、KV 头数、训练上下文、MoE 专家数…）自动算出一整套合理参数 → 直接启动 **llama-server（API 服务，带内嵌流式聊天）** 或 **llama-cli（系统终端对话）**。
+
+![界面截图](docs/screenshot.png)
+
+## 功能
+
+| 功能 | 说明 |
+|---|---|
+| 硬件检测 | macOS：`sysctl`/`system_profiler`/`vm_stat`（芯片、P/E 核、Metal、可用内存）；Windows：PowerShell CIM + 注册表 `qwMemorySize`（**显存**、物理核）；Linux：`/proc` + `lscpu` + `nvidia-smi`/`rocm-smi` |
+| 显存感知推荐 | **PC（独立显卡）按「显存 + 内存」两笔账**规划：全量卸载 → KV 回内存 → MoE 专家留内存 → 部分卸载，并给出各自的余量；显存读不到时明确警告并交回引擎（ngl=auto） |
+| 模型扫描 | 目录递归找 `.gguf`，自研 GGUF v3 头解析（流式读，大文件不吃内存） |
+| 文件角色识别 | 读 `general.type` + 架构判定：**主模型 / mmproj 视觉投影 / 草稿(draft) 模型**。附属文件不再冒充独立模型，而是挂到同目录主模型上（👁 视觉投影 / ⚡ 草稿），选主模型时自动配对好 `-mm` / `-md` |
+| 量化实测 | 读 **tensor 表**按元素数加权推导真实量化（发布者的 `general.file_type` 经常写错，如 BF16 的 mmproj 标成 IQ3_S）；元数据不一致时界面标注"元数据 X 不准" |
+| 一键配置 | 内存模型估算（权重 + 附属文件 + KV + 计算缓冲）→ 推荐 ngl / ctx / KV 精度 / MoE 专家卸载 / 线程 / 采样 |
+| 参数说明 | 每个参数中文说明（hover 提示）+ 关联说明（控件下方小字） |
+| 关联提示 | 上下文>训练长度→YaRN 警告；超内存→红色提示+一键修复（降 ctx / q8_0 KV / 增专家卸载）；并行→KV×N 提示；线程超 P 核提示；**内置 MTP → 一键开启 `--spec-type draft-mtp`**；草稿模型类型不匹配→提示纠正；**decision 模型类型不受引擎支持→红色预警** |
+| 换算工具 | 当前 ctx ↔ KV 占用 GB；内存预算 → 最大可容纳上下文（实时） |
+| 内存面板 | 堆叠条：GPU 权重 / 内存池权重 / KV / 计算 / 空闲（附属文件单列），修改参数实时重算 |
+| 视觉 / 加速 | `-mm` 视觉投影（默认 GPU 卸载）、`-md` 草稿模型 + `--spec-type`；**投机解码下拉框按当前模型能力过滤**：只有内置 MTP 或配套草稿模型时才列出 draft-*，ngram-* 恒可用，不可用项隐藏并在旁注明原因 |
+| 启动 | server：进程托管 + 日志流 + 就绪检测 + 优雅停止；cli：生成脚本在 Terminal.app 打开（真实 TTY） |
+| 内嵌聊天 | OpenAI 兼容 `/v1/chat/completions` 流式对话，支持 API Key、中止、多轮；推理模型的思考内容以 💭 斜体单独展示；**请求固定 `id_slot`**，使这段上下文留在该 slot 里可被存盘 |
+| 会话存盘 | `--slot-save-path` + `/slots/{id}?action=save\|restore\|erase`：把一段长会话（提示词缓存 + KV）整体存成磁盘文件，之后**秒级恢复、无需重新 prefill**。反复用同一份长文档（报告/代码库/合同）时最省时间；面板内可直接列出/恢复/删除存盘文件 |
+| 文件定位（右键） | **右键**模型卡片、卡片上的 👁/⚡ 附属标签、未配对文件标签或存盘文件 → 「在文件夹中显示（高亮文件）/ 打开所在文件夹 / 复制完整路径」；卡片右上角 `⋯` 是等价入口。核对"文件是不是齐了、路径对不对"时不用再去 Finder/资源管理器里翻目录 |
+| 引擎自检 | 调用 `llama-fit-params` 做引擎侧交叉验证（信息性输出） |
+| 端口检测 | 启动前检测占用，自动建议空闲端口 |
+
+## 快速开始
+
+```bash
+npm install
+npm start
+```
+
+1. 在 **① 选择模型** 填入模型目录（默认 `~/models`），点「重新扫描」。
+2. 点击模型卡片 → 点 **⚡ 一键生成配置**（右侧内存条与命令预览实时更新）。
+3. **③ 启动引擎** → 「启动」。server 模式就绪后可直接在下方对话框聊天；cli 模式会在系统终端打开。
+
+> 想核对磁盘上的文件（是否缺 mmproj、量化对不对）：**右键模型卡片** → 「在文件夹中显示」，直接在文件管理器里高亮该 `.gguf`。
+
+### 依赖的引擎
+
+本应用不含 llama.cpp 二进制，使用你仓库中的构建产物（默认探测 `~/GitHub/llama.cpp/build`，可在「llama.cpp build 目录」输入框指定）：
+
+```bash
+./scripts/build-engine.sh [仓库路径]
+# = cmake（LLAMA_BUILD_SERVER=ON, LLAMA_BUILD_UI=ON）+ ninja 构建 llama-cli / llama-server / llama-fit-params
+```
+
+### 判决(decision)模型兼容补丁（可选）
+
+部分第三方导出的判决模型把 `*.decision.type` 写成 `jev`，而引擎类型表里只有 `openjev`（两者的 `systemone` 模板与 `temperature/verbalizer_ids/bias.{noul,score,choice}` 元数据结构完全一致），不打补丁会在加载阶段直接退出：
+
+```
+failed to init decision model: unsupported decision model type: jev
+```
+
+```bash
+./scripts/patch-engine.sh status   # 查看是否已应用（自动探测仓库路径）
+./scripts/patch-engine.sh apply    # 打补丁（幂等，可重复执行）
+./scripts/patch-engine.sh revert   # 回退
+# 打完补丁后重建引擎：
+cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli -j 10
+```
+
+应用会把这类模型标成「🎯 判决模型 jev（别名→openjev）」，并在提示区说明它走 `/v1/systemone` 而不是聊天接口。
+
+## 测试
+
+```bash
+npm test
+```
+
+`node:test` 单元测试（不依赖 Electron，当前 **108 项全绿**）：
+
+- `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
+- `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
+- `test/recommend-discrete.test.js` — PC 双预算规划（9 种显存/内存组合 + 规划器与内存面板口径一致性不变量）
+- `test/memory.test.js` — 内存模型：ngl 比例、KV 精度/并行缩放、超限判定
+- `test/args.test.js` — CLI 参数映射（对照 llama.cpp 源码核对过标志名）
+- `test/role.test.js` — 文件角色 / 量化实测 / decision 类型 / 附属文件归组
+- `test/spec.test.js` — 投机解码类型与模型能力的匹配矩阵
+- `test/slots.test.js` — 会话存盘的磁盘操作（文件名校验 / 列目录 / 删除 / 防路径穿越）
+- `test/hardware.test.js` — 跨平台硬件解析（nvidia-smi / 注册表显存 / WMI 溢出兜底 / lscpu / 多卡取最大）
+- `test/engine.test.js` — 引擎二进制候选与终端启动命令（`.exe`、`launch.cmd` 转义、各平台终端链）
+- `test/reveal.test.js` — 「在文件夹中显示」的目标解析（文件高亮 / 目录直接打开 / 文件已消失时报错）
+- `test/paths.test.js` — 渲染层路径工具（Windows 反斜杠路径的取目录 / 拼路径）
+
+## 目录结构
+
+```
+main/            主进程
+  main.js        窗口 + IPC 路由（含 fs:reveal 文件定位、clipboard:write）
+  hardware.js    硬件扫描（macOS/Linux/Windows）
+  gguf.js        GGUF v3 流式解析
+  models.js      模型目录扫描
+  recommend.js   一键推荐（纯函数，可单测）
+  reveal.js      「在文件夹中显示」目标解析（纯函数）
+  config.js      settings.json 持久化
+  engine.js      server 进程管理 / 终端启动 / 端口探测 / fit 自检
+shared/args.js   CLI 参数映射（唯一来源）
+preload.js       contextBridge（lm.* API）
+renderer/
+  index.html     三区布局：模型 / 配置+内存 / 启动+聊天
+  app.js         UI 逻辑（提示规则、换算、聊天流、右键菜单接线）
+  ctxmenu.js     通用右键菜单组件
+  paths.js       路径字符串工具（兼容 Windows 反斜杠，纯函数）
+  i18n.js        参数元数据中心（中文说明/关联说明）
+  styles.css     深色主题
+test/            node:test 单元测试 + GGUF 夹具生成器
+  role.test.js   文件角色识别 / tensor 实测量化 / decision 类型 / 附属文件归组
+  spec.test.js   投机解码类型与模型能力的匹配矩阵
+  slots.test.js  会话存盘的磁盘操作（文件名校验 / 列目录 / 删除 / 防路径穿越）
+  reveal.test.js 文件定位目标解析（高亮 / 打开目录 / 缺失报错）
+  paths.test.js  路径工具（Windows 反斜杠）
+scripts/build-engine.sh  引擎重建脚本（macOS / Linux）
+scripts/build-engine.ps1 引擎重建脚本（Windows / PowerShell）
+scripts/patch-engine.sh  decision 类型别名补丁（apply / revert / status）
+scripts/patches/         补丁文件
+e2e/             CDP 端到端脚本（`node e2e/cdp-eval.js <步骤脚本>`，需应用带 --remote-debugging-port 启动；
+                 目录/存盘路径用 LM_MODELS_DIR / LM_SLOTS_DIR 环境变量传入，见 e2e/README.md）
+```
+
+## 内存模型（一键配置的算法核心）
+
+```
+KV 字节/ token = 注意力层数 × KV头数 × 头维 × (K精度字节 + V精度字节)
+总占用 = 主模型 + mmproj + 草稿模型 + KV × 上下文 × 并行数 + 计算缓冲(≈1.5GB + 0.5GB×batch/2048)
+可用内存 = 总内存 − max(8GB, 20%×总内存)
+```
+
+- **注意力层数**而非总层数：混合 SSM/注意力架构（如 `qwen35`）只有部分层带 KV 缓存（读 `attention.recurrent_layers`），按总层数会高估 ~35%。
+- **头维**优先取 `attention.key_length`：混合架构下 `embedding_length/head_count` 会失真（213 vs 实际 256）。
+- **上下文优先拉满到模型训练长度**：从训练长度向下找可容纳档位（档位 4K…256K，上限跟随 `context_length`），装不下再降 KV 精度（只自动用 f16 → q8_0；q4_0 质量损失可感，只在连最小档都装不下时兜底，其余情况仅作为「理论上可到 X」的提示）。
+- **附属文件计入预算**：mmproj / 草稿模型的大小会从内存预算里先扣掉，再决定上下文档位。
+- **投机解码按能力给默认值**：模型自带 MTP 层 → `draft-mtp`；配了草稿模型 → 按其架构（dflash/eagle3/dspark/simple）；都没有 → `none`。
+- MoE：文件较大（> 0.6×可用内存）时把全部专家层留在内存池（`-ncmoe N`，GPU 只留 ~15% 权重）——统一内存下专家权重计算强度低，走内存几乎不损失速度。
+- Apple Silicon 统一内存 → `ngl=all`（全量 Metal 卸载）；线程 = P 核数，批处理线程 = 总核数。
+- 上下文 > 训练长度 → 提示 YaRN（预填 `--yarn-orig-ctx`，不自动开启）。
+
+## GGUF 解析要点（踩过的坑）
+
+| 项 | 正确做法 |
+|---|---|
+| 版本头 | `magic 'GGUF'` + **u32** version + i64 tensor_count + i64 kv_count |
+| 字符串 | **u64** 长度前缀（键名与字符串值都是） |
+| 类型枚举 | 8=string、**9=array**、**10=u64**、11=i64、12=f64；bool 占 **1 字节**（旧资料里 9=u64 / 12=array 已过时） |
+| array | `i32 元素类型` + `u64 元素个数` + 元素序列（`tokenizer.ggml.tokens` 可到 25 万项） |
+| 量化 | 读 **tensor 表**按元素数加权统计（跳过 1 维张量）→ 发布者的 `general.file_type` 常年不准 |
+| 角色 | `general.type=mmproj` / `arch=clip` → 视觉投影；`arch=dflash/eagle3/dspark` → 草稿模型；其余为主模型 |
+| 判决模型 | `*.decision.type`（如 `jev`）必须是引擎支持的取值，否则 llama-server 直接退出 |
+
+## 会话存盘（反复用同一份长文档）
+
+llama.cpp 的 KV 缓存只能待在内存里（**磁盘无法扩展上下文长度**），但可以**把一段已经算好的上下文存到磁盘、随时恢复**：
+
+1. 「② 配置参数 → 高级选项 → 会话存盘目录」填一个目录（如 `~/llama-slots`），**重启服务**生效。
+2. 在「③ 启动引擎 → 会话存盘」面板里：对话固定使用 `会话 slot 0`，故这段上下文会保留在内存中。
+3. 喂完长文档后点 **保存到磁盘** → 生成 `xxx.bin`（体积 ≈ 该 slot 的 KV 大小）。
+4. 之后随时 **从磁盘恢复**，再提问就直接复用，跳过几万 token 的 prefill（实测 187 tokens 的会话：存盘 66ms / 恢复 23ms / 后续请求复用约 50%）。
+
+要点：请求必须带 `id_slot`（应用已自动带上），否则服务端会在请求结束后释放 slot，存下来的是空状态。
+命令行等价用法：
+
+```bash
+llama-server -m model.gguf --slot-save-path ~/llama-slots ...
+curl -X POST 'http://127.0.0.1:9931/slots/0?action=save'    -H 'Content-Type: application/json' -d '{"filename":"doc.bin"}'
+curl -X POST 'http://127.0.0.1:9931/slots/0?action=restore' -H 'Content-Type: application/json' -d '{"filename":"doc.bin"}'
+```
+
+## 跨平台支持（macOS / Windows / Linux）
+
+| 能力 | macOS | Windows | Linux |
+|---|---|---|---|
+| 应用外壳 / UI / 解析 / 参数生成 | ✅ | ✅ | ✅ |
+| 引擎二进制探测 | ✅ `build/bin` | ✅ `build\bin\Release`（MSVC）与 `build\bin`，自动加 `.exe` | ✅ `build/bin` |
+| 硬件检测 | ✅ 统一内存（无独立显存） | ✅ 显存走注册表 `qwMemorySize`（WMI 的 AdapterRAM 大于 4GB 会溢出，仅作兜底） | ✅ `nvidia-smi` / `rocm-smi` |
+| 一键配置内存模型 | 统一内存单笔账 | **显存 + 内存两笔账**，自动决定 ngl / KV 放哪边 / MoE 专家留内存 | 同 Windows |
+| CLI 模式开终端 | ✅ Terminal.app | ✅ 生成 `launch.cmd`（UTF-8 代码页），`cmd /c start` 打开新窗口 | ✅ 链式探测 `x-terminal-emulator`/`gnome-terminal`/`konsole`/`xfce4-terminal`/`alacritty`/`xterm` |
+| 会话存盘 | ✅ | ✅ | ✅ |
+| 右键「在文件夹中显示」 | ✅ Finder 高亮文件（已实测） | ✅ 资源管理器 `/select`（同 Electron `shell.showItemInFolder`） | ✅ 由桌面环境决定是否高亮，至少会打开目录 |
+| 打包 | `npm run pack:mac` | `npm run pack:win`（NSIS + 便携版） | `npm run pack:linux`（AppImage） |
+
+Windows 构建引擎：
+
+```powershell
+.\scripts\build-engine.ps1                 # 默认 ~\llama.cpp
+.\scripts\build-engine.ps1 -Repo D:\llama.cpp -Clean
+```
+
+平台相关逻辑（显存解析、二进制候选、脚本与命令行生成、双预算规划）**全部是可注入的纯函数并已单测覆盖**（`test/hardware.test.js`、`test/engine.test.js`、`test/recommend-discrete.test.js`），可在任意平台验证。
+
+## 安全
+
+- `contextIsolation: true`，渲染层无 Node 权限；所有系统操作走 IPC 白名单。
+- server 默认只监听 `127.0.0.1`。
+
+## 已知限制
+
+- **Windows 尚未在真机验证**：显存检测（注册表 `qwMemorySize`）与 `launch.cmd` 启动路径的代码已完成并有单测，但要在真实 PC 上跑一遍才能确认；若显存读不到，应用会显示「未能检测到显卡显存」并把 `ngl` 交给引擎。
+- KV 精度字节数为块量化近似值（q8_0≈1.03B 等），估算误差 < 3%。
+- **文件定位的 Windows/Linux 表现尚未真机验证**（macOS 已实测：Finder 高亮文件 + 打开目录）：走的是 Electron `shell.showItemInFolder` / `shell.openPath`，路径解析逻辑已单测（`test/reveal.test.js`、`test/paths.test.js`）。
+- 引擎为私有 fork（带 decision 模型支持）时，模型元数据里的 `*.decision.type` 必须在该构建的类型表内，应用只能预警、无法绕过。

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src http://127.0.0.1:* http://localhost:*; img-src 'self' data:" />
+  <title>LlamaManger</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">🦙</span>
+      <div>
+        <h1>LlamaManger</h1>
+        <div class="sub">llama.cpp 一键启动器</div>
+      </div>
+    </div>
+    <div class="hw-card" id="hwCard">
+      <div class="hw-loading">检测硬件中…</div>
+    </div>
+  </header>
+
+  <main>
+    <!-- 模型区 -->
+    <section class="panel model-section">
+      <div class="section-head">
+        <h2>① 选择模型</h2>
+        <div class="row">
+          <input type="text" id="modelDir" class="dir-input" spellcheck="false" />
+          <button id="btnPickDir" class="btn">选择目录…</button>
+          <button id="btnRescan" class="btn">重新扫描</button>
+        </div>
+      </div>
+      <div id="modelList" class="model-list">
+        <div class="empty">尚未扫描。选择包含 .gguf 文件的目录后开始。</div>
+      </div>
+      <div class="list-hint">右键模型卡片（或卡片上的 <b>⋯</b> 按钮）可直接在文件管理器中打开/定位对应文件，方便核对文件是否齐全。</div>
+      <div id="modelInfo" class="model-info hidden"></div>
+      <div id="modelWarnings" class="warnings hidden"></div>
+    </section>
+
+    <!-- 配置区 -->
+    <section class="panel config-section">
+      <div class="section-head">
+        <h2>② 配置参数</h2>
+        <div class="tabs" id="modeTabs">
+          <button data-mode="server" class="tab active">API 服务 (llama-server)</button>
+          <button data-mode="cli" class="tab">终端对话 (llama-cli)</button>
+        </div>
+      </div>
+
+      <div class="oneclick-row">
+        <button id="btnOneClick" class="btn primary big">⚡ 一键生成配置</button>
+        <span class="oneclick-hint">基于本机硬件 + 模型架构自动计算推荐值（每个参数可单独修改，修改后实时重算内存）</span>
+        <label class="adv-label"><input type="check" id="advToggle" /> 高级选项</label>
+        <button id="btnFitCheck" class="btn ghost" title="调用 llama-fit-params 引擎自检（信息性输出）">引擎自检</button>
+      </div>
+
+      <div id="hints" class="hints"></div>
+
+      <div class="config-grid">
+        <div id="paramGroups" class="param-groups"></div>
+        <aside class="mem-panel" id="memPanel">
+          <h3>内存估算</h3>
+          <div class="mem-empty" id="memEmpty">选择模型后显示内存分解</div>
+          <div id="memBody" class="hidden">
+            <div class="mem-bar" id="memBar"></div>
+            <div class="mem-legend" id="memLegend"></div>
+            <div class="mem-status" id="memStatus"></div>
+
+            <div class="convert-box">
+              <h4>换算工具</h4>
+              <div class="cv-row">
+                <label>当前上下文</label>
+                <div class="cv-val" id="cvCtx">—</div>
+              </div>
+              <div class="cv-row">
+                <label>≈ KV 缓存占用</label>
+                <div class="cv-val" id="cvKv">—</div>
+              </div>
+              <div class="cv-row">
+                <label>内存预算 (GB)</label>
+                <input type="number" id="cvBudget" min="1" step="1" />
+              </div>
+              <div class="cv-row">
+                <label>→ 最大上下文</label>
+                <div class="cv-val" id="cvMaxCtx">—</div>
+              </div>
+              <div class="cv-note">按当前模型架构与 KV 精度实时计算；预算含权重+KV+2GB 缓冲。</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- 启动区 -->
+    <section class="panel launch-section">
+      <div class="section-head">
+        <h2>③ 启动引擎</h2>
+        <div class="launch-bar">
+          <button id="btnStart" class="btn primary">▶ 启动</button>
+          <button id="btnStop" class="btn danger" disabled>■ 停止</button>
+          <span id="engineState" class="engine-state"></span>
+          <a id="serverUrl" class="url hidden" target="_blank" rel="noopener"></a>
+        </div>
+      </div>
+      <div class="buildrow">
+        <label for="buildDir" title="llama.cpp 的 build 目录（包含 bin/llama-server）。留空则自动探测 ~/GitHub/llama.cpp/build">llama.cpp build 目录</label>
+        <input type="text" id="buildDir" class="dir-input" style="width:420px" spellcheck="false" placeholder="自动探测（默认 ~/GitHub/llama.cpp/build）" />
+      </div>
+      <div class="cmd-box">
+        <div class="cmd-head">
+          <span>启动命令（预览）</span>
+          <button id="btnCopyCmd" class="btn ghost small">复制</button>
+        </div>
+        <code id="cmdPreview" class="cmd-preview">—</code>
+      </div>
+      <div id="console" class="console"></div>
+      <div id="fitOutput" class="fit-output hidden"></div>
+
+      <!-- 会话存盘（server 模式 + --slot-save-path） -->
+      <div class="slots" id="slotPanel">
+        <div class="chat-head">
+          <h3>💾 会话存盘</h3>
+          <span class="chat-hint">对话固定使用下面的 slot，这段上下文会一直留在内存里；存成磁盘文件后可随时秒级恢复，下次提问直接复用、无需重新处理长提示词 —— 反复用同一份长文档（报告、代码库、合同）时最省时间。右键文件可打开所在目录。</span>
+        </div>
+        <div class="slot-bar">
+          <label for="slotId" title="对话与该 slot 绑定：保存的就是这段对话的上下文">会话 slot</label>
+          <input type="number" id="slotId" value="0" min="0" max="63" step="1" style="width:62px">
+          <input type="text" id="slotFile" placeholder="文件名，如 doc-256k.bin" spellcheck="false">
+          <button id="btnSlotSave" class="btn">保存到磁盘</button>
+          <button id="btnSlotRestore" class="btn">从磁盘恢复</button>
+          <button id="btnSlotErase" class="btn ghost">清空 slot</button>
+          <button id="btnSlotRefresh" class="btn ghost small">刷新列表</button>
+        </div>
+        <div id="slotStatus" class="slot-status">—</div>
+        <div id="slotList" class="slot-list"></div>
+      </div>
+
+      <!-- 聊天面板（server 模式） -->
+      <div class="chat" id="chatPanel">
+        <div class="chat-head">
+          <h3>对话</h3>
+          <span class="chat-hint">通过 OpenAI 兼容 API（/v1/chat/completions）流式对话；需先启动 API 服务</span>
+        </div>
+        <div id="chatMsgs" class="chat-msgs"></div>
+        <div class="chat-input">
+          <textarea id="chatText" rows="2" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+          <div class="chat-btns">
+            <button id="btnChatSend" class="btn primary">发送</button>
+            <button id="btnChatStop" class="btn ghost" disabled>停止</button>
+            <button id="btnChatClear" class="btn ghost">清空</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" title="点击关闭"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
