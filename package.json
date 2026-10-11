@@ -14,6 +14,26 @@
   },
   "author": "Ricky",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sdricky-dev/llama-manger.git"
+  },
+  "homepage": "https://github.com/sdricky-dev/llama-manger#readme",
+  "bugs": {
+    "url": "https://github.com/sdricky-dev/llama-manger/issues"
+  },
+  "keywords": [
+    "llama.cpp",
+    "gguf",
+    "electron",
+    "llm",
+    "launcher",
+    "llama-server",
+    "local-llm",
+    "apple-silicon",
+    "moe",
+    "speculative-decoding"
+  ],
   "devDependencies": {
     "electron": "^37.0.0",
     "electron-builder": "^26.0.0"
