@@ -45,12 +45,51 @@ test('配了 DFlash 草稿：只放行 draft-dflash，并屏蔽 eagle3/dspark', 
   const model = { ...PLAIN, companions: { mmproj: [], draft: [draft('dflash')] } };
   const avail = availableValues(model);
   assert.ok(avail.includes('draft-dflash'));
-  assert.ok(avail.includes('draft-simple'), '通用草稿类型仍可用');
   assert.ok(!avail.includes('draft-eagle3'));
   assert.ok(!avail.includes('draft-dspark'));
   assert.equal(supportFor(model).recommended, 'draft-dflash');
   // 不可用原因要指向正确类型
   assert.match(supportFor(model).options.find((o) => o.value === 'draft-eagle3').reason, /draft-dflash/);
+});
+
+test('DFlash 草稿必须屏蔽通用 draft-simple（实测选错会慢一倍）', () => {
+  const model = { ...PLAIN, companions: { mmproj: [], draft: [draft('dflash')] } };
+  const avail = availableValues(model);
+  assert.ok(!avail.includes('draft-simple'), 'dflash 有专用实现，不能退化到 draft-simple');
+  const simple = supportFor(model).options.find((o) => o.value === 'draft-simple');
+  assert.equal(simple.available, false);
+  assert.match(simple.reason, /draft-dflash/, '原因里要指出正确取值');
+  assert.match(simple.reason, /0\.4%/, '并说明实测代价');
+});
+
+test('架构未知的普通草稿（llama/qwen3）仍可用 draft-simple 并被推荐', () => {
+  for (const arch of ['llama', 'qwen3', null]) {
+    const model = { ...PLAIN, companions: { mmproj: [], draft: [draft(arch)] } };
+    assert.equal(supportFor(model).recommended, 'draft-simple', String(arch));
+    assert.ok(availableValues(model).includes('draft-simple'), String(arch));
+    // 专用类型不该对普通草稿开放
+    assert.ok(!availableValues(model).includes('draft-eagle3'), String(arch));
+  }
+});
+
+test('eagle3 草稿：只放行 draft-eagle3', () => {
+  const model = { ...PLAIN, companions: { mmproj: [], draft: [draft('eagle3')] } };
+  const avail = availableValues(model);
+  assert.ok(avail.includes('draft-eagle3'));
+  assert.ok(!avail.includes('draft-simple'));
+  assert.ok(!avail.includes('draft-dflash'));
+});
+
+test('模型同时有内置 MTP 与草稿时给出实测对比提示', () => {
+  const model = { ...MTP, companions: { mmproj: [], draft: [draft('dflash')] } };
+  const r = supportFor(model);
+  assert.equal(r.recommended, 'draft-dflash', '仍按草稿架构推荐');
+  assert.ok(r.hint, '应有提示');
+  assert.match(r.hint, /draft-mtp/);
+  assert.match(r.hint, /draft-dflash/);
+  // 草稿就是 MTP 时不必提示
+  const mtpDraft = { ...MTP, companions: { mmproj: [], draft: [draft('mtp')] } };
+  assert.equal(supportFor(mtpDraft).hint, null);
 });
 
 test('草稿模型存在但未在 params 中启用时，按同目录唯一草稿识别', () => {
@@ -89,4 +128,30 @@ test('ngram 类型任何模型都可用（无需额外模型）', () => {
       assert.ok(avail.includes(t), `${t} 应对任何模型可用`);
     }
   }
+});
+
+test('旧数据兼容：companions 里缺 arch 时按文件名兜底（这正是 dflash 被误判的入口）', () => {
+  // 修复前 main/models.js 的 brief() 不带 arch，导致 dflash 草稿被判成「普通草稿」
+  const legacy = {
+    arch: 'qwen35',
+    hasMtp: true,
+    companions: {
+      mmproj: [],
+      draft: [{ path: '/m/Qwen3.8-27B-DFlash2-Q4_K_M.gguf', name: 'Qwen3.8-27B-DFlash2-Q4_K_M.gguf', quant: 'Q4_K_M' }],
+    },
+  };
+  const r = supportFor(legacy, { specDraft: '/m/Qwen3.8-27B-DFlash2-Q4_K_M.gguf' });
+  assert.equal(r.recommended, 'draft-dflash', '按文件名认出 dflash');
+  assert.ok(!availableValues(legacy, { specDraft: '/m/Qwen3.8-27B-DFlash2-Q4_K_M.gguf' }).includes('draft-simple'));
+  // 且不应污染调用方的对象：再次调用仍然一致
+  assert.equal(supportFor(legacy, {}).recommended, 'draft-dflash');
+});
+
+test('旧数据兼容：文件名认不出架构时仍是 draft-simple', () => {
+  const legacy = {
+    arch: 'llama',
+    hasMtp: false,
+    companions: { mmproj: [], draft: [{ path: '/m/tiny-draft.gguf', name: 'tiny-draft.gguf' }] },
+  };
+  assert.equal(supportFor(legacy, {}).recommended, 'draft-simple');
 });

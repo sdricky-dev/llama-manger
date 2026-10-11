@@ -135,8 +135,21 @@ export const PARAMS = {
     type: 'select',
     options: ['none', 'draft-simple', 'draft-dflash', 'draft-mtp', 'draft-eagle3', 'draft-dspark', 'ngram-simple', 'ngram-mod'],
     def: 'none',
-    desc: '加速解码的算法。有草稿模型时必须匹配其类型（DFlash→draft-dflash，普通小模型→draft-simple）；模型自带 MTP 头时选 draft-mtp 即可，无需草稿文件；ngram-* 不需要任何模型。',
-    related: '选错类型会导致草稿模型不生效或加载报错。不确定时先用 draft-simple。',
+    desc: '加速解码的算法。草稿模型有专用实现时必须匹配其架构（dflash→draft-dflash、eagle→draft-eagle3、dspark→draft-dspark）；只有架构未知的普通小模型才用 draft-simple；模型自带 MTP 头时选 draft-mtp（不需要草稿文件）；ngram-* 不需要任何模型。下拉框只列出当前模型真正可用的取值。',
+    related: '实测（Qwen3.8-27B + DFlash2 草稿，256K/q8_0，Mac M5 Max）：draft-simple 接受率仅 0.4% → 16.2 tok/s（比不开加速的 32.4 tok/s 还慢一倍）；draft-dflash 接受率 51.6% → 44.9 tok/s；draft-mtp 68.4% → 52 tok/s。专用架构用错通用类型 = 白付草稿成本。',
+  },
+  specDraftNMax: {
+    label: '每次草稿 token 数上限',
+    flag: '--spec-draft-n-max',
+    type: 'number',
+    min: 1,
+    max: 32,
+    step: 1,
+    def: 3,
+    desc: '每一步让草稿模型最多猜几个 token（引擎默认 3）。猜得多 → 平均接受长度变长，但验证开销也变大、接受率反而下降，所以「调大」不一定更快。',
+    related: '本机实测：draft-mtp 默认 3 最快（52 tok/s），调到 8 掉到 39、16 掉到 19；draft-dflash 从 3 调到 8 反而从 44 升到 52（它一次并行出 8 个块的 token）。改完请用「③ 启动引擎」的对话或日志里的 draft acceptance 对比。',
+    advanced: true,
+    showIf: (s) => !!s.params?.specDraft || s.params?.specType === 'draft-mtp',
   },
 
   // ---------- 性能 ----------
@@ -420,7 +433,7 @@ export const PARAMS = {
 
 export const GROUPS = [
   { id: 'engine', name: '引擎与内存', params: ['ngl', 'nCpuMoe', 'kvOffload', 'flashAttn', 'ctx', 'cacheTypeK', 'cacheTypeV', 'parallel', 'swaFull'] },
-  { id: 'attach', name: '附属文件（视觉 / 加速）', params: ['mmproj', 'mmprojOffload', 'specDraft', 'specDraftNgl', 'specType'] },
+  { id: 'attach', name: '附属文件（视觉 / 加速）', params: ['mmproj', 'mmprojOffload', 'specDraft', 'specDraftNgl', 'specType', 'specDraftNMax'] },
   { id: 'perf', name: '性能', params: ['threads', 'threadsBatch', 'batch', 'ubatch'] },
   { id: 'sampling', name: '采样', params: ['temp', 'topK', 'topP', 'minP', 'repeatPenalty', 'seed'] },
   { id: 'server', name: 'API 服务 (llama-server)', params: ['host', 'port', 'apiKey', 'metrics'], mode: 'server' },

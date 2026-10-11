@@ -122,3 +122,33 @@ test('会话存盘：未填目录时不生成标志', () => {
   const b = buildArgs(BASE, '/tmp/m.gguf', 'server');
   assert.ok(!b.includes('--slot-save-path'), '未定义该键时同样不生成');
 });
+
+// ---------- 投机解码（--spec-type / -md / -ngld / --spec-draft-n-max） ----------
+
+test('投机解码：草稿模型 → -md + -ngld + --spec-type', () => {
+  const p = { ...BASE, specDraft: '/tmp/d.gguf', specDraftNgl: 'all', specType: 'draft-dflash' };
+  const a = buildArgs(p, '/tmp/m.gguf', 'server');
+  assert.ok(hasPair(a, '-md', '/tmp/d.gguf'));
+  assert.ok(hasPair(a, '-ngld', 'all'));
+  assert.ok(hasPair(a, '--spec-type', 'draft-dflash'));
+});
+
+test('投机解码：none 不下发 --spec-type', () => {
+  const a = buildArgs({ ...BASE, specType: 'none' }, '/tmp/m.gguf', 'server');
+  assert.ok(!a.includes('--spec-type'));
+});
+
+test('投机解码：MTP 模式不需要 -md', () => {
+  const a = buildArgs({ ...BASE, specType: 'draft-mtp' }, '/tmp/m.gguf', 'server');
+  assert.ok(hasPair(a, '--spec-type', 'draft-mtp'));
+  assert.ok(!a.includes('-md'));
+});
+
+test('草稿长度：默认 3 不下发，改了才下发', () => {
+  const base = { ...BASE, specType: 'draft-dflash', specDraft: '/tmp/d.gguf' };
+  assert.ok(!buildArgs({ ...base, specDraftNMax: 3 }, '/tmp/m.gguf', 'server').includes('--spec-draft-n-max'));
+  assert.ok(!buildArgs(base, '/tmp/m.gguf', 'server').includes('--spec-draft-n-max'));
+  assert.ok(hasPair(buildArgs({ ...base, specDraftNMax: 8 }, '/tmp/m.gguf', 'server'), '--spec-draft-n-max', '8'));
+  // cli 模式同样支持
+  assert.ok(hasPair(buildArgs({ ...base, specDraftNMax: 8 }, '/tmp/m.gguf', 'cli'), '--spec-draft-n-max', '8'));
+});

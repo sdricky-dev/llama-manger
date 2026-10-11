@@ -249,16 +249,57 @@ function extractModelInfo(meta, filePath, nameOverride) {
   const ctxTrain = Number(A('context_length')) || 0;
   const nEmb = Number(A('embedding_length')) || 0;
   const nHead = Number(A('attention.head_count')) || 0;
-  const nKvHead = Number(A('attention.head_count_kv')) || nHead;
+  const kvHeadRaw = A('attention.head_count_kv');
+  // gemma4 等 sliding-window 混合模型逐层给 KV 头数（数组），普通模型是标量
+  const kvHeadPerLayer = Array.isArray(kvHeadRaw) ? kvHeadRaw.map(Number) : null;
+  const nKvHead = kvHeadPerLayer ? Math.max(...kvHeadPerLayer, 0) : Number(kvHeadRaw) || nHead;
   // 头维：优先 attention.key_length（混合 SSM 架构中 nEmb/nHead 会失真）
   const headDim =
     Number(A('attention.key_length')) ||
     (nEmb && nHead ? Math.round(nEmb / nHead) : 0);
-  // 混合 SSM/注意力架构：KV 缓存只存在于注意力层
+
+  // ---------- KV 缓存到底有几层、每层多大 ----------
+  // 1) MTP / nextn 层由引擎单独建上下文，不占主模型的 KV
+  const nextn = Number(A('nextn_predict_layers')) || 0;
+  const kvLayers = Math.max(nLayer - nextn, 0) || nLayer;
+  // 2) 混合 SSM/线性注意力：只有「非 recurrent」层存 KV
+  //    recurrent_layers[i] = true 表示该层是 SSM 层（不存 KV），
+  //    所以注意力层是标记为 false 的那些；不能数 true（那得到的是 SSM 层数）。
   const recurrent = A('attention.recurrent_layers');
-  const nAttnLayer = Array.isArray(recurrent)
-    ? recurrent.filter(Boolean).length || nLayer
-    : nLayer;
+  // 3) 没有 recurrent_layers 时看 full_attention_interval（Qwen3-Next/3.5 系列：
+  //    每 N 层一个全注意力层），引擎同样按这个算 KV 层数
+  const interval = Number(A('full_attention_interval')) || 0;
+  let attnFlags;
+  if (Array.isArray(recurrent)) {
+    attnFlags = recurrent.slice(0, kvLayers).map((x) => !x);
+  } else if (interval > 0) {
+    attnFlags = Array.from({ length: kvLayers }, (_, i) => (i + 1) % interval === 0);
+  } else {
+    attnFlags = Array.from({ length: kvLayers }, () => true);
+  }
+  const nAttnLayer = attnFlags.filter(Boolean).length || nLayer;
+  // 4) 每层的 K/V 元素数（heads × head_dim）；SWA 层的头维可能更小
+  const swaPattern = A('attention.sliding_window_pattern');
+  const keyLen = Number(A('attention.key_length')) || headDim;
+  const valLen = Number(A('attention.value_length')) || keyLen;
+  const keyLenSwa = Number(A('attention.key_length_swa')) || keyLen;
+  const valLenSwa = Number(A('attention.value_length_swa')) || valLen;
+  let kvUnitsK = 0;
+  let kvUnitsV = 0;
+  const attnLayerIdx = [];
+  for (let i = 0; i < attnFlags.length; i++) {
+    if (!attnFlags[i]) continue;
+    attnLayerIdx.push(i);
+    const heads = kvHeadPerLayer ? Number(kvHeadPerLayer[i]) || 0 : nKvHead;
+    const swa = Array.isArray(swaPattern) ? !!swaPattern[i] : false;
+    kvUnitsK += heads * (swa ? keyLenSwa : keyLen);
+    kvUnitsV += heads * (swa ? valLenSwa : valLen);
+  }
+  if (!kvUnitsK) {
+    kvUnitsK = nAttnLayer * nKvHead * headDim;
+    kvUnitsV = kvUnitsK;
+  }
+
   const expertCount = Number(A('expert_count')) || 0;
   const expertShared = Number(A('expert_shared_count')) || 0;
   const ftype = Number(A('file_type') ?? kv['general.file_type']) || null;
@@ -282,6 +323,16 @@ function extractModelInfo(meta, filePath, nameOverride) {
     nKvHead,
     headDim,
     nAttnLayer,
+    nextnLayers: nextn, // MTP/nextn 层数（不占主模型 KV）
+    kvUnitsK, // 每 token 的 K 元素数（= Σ 层 heads×head_dim，含 SWA 差异）
+    kvUnitsV, // 每 token 的 V 元素数
+    kvGeometry: {
+      layers: attnFlags.length,
+      attnLayers: attnLayerIdx.length,
+      interval: interval || null,
+      perLayerHeads: !!kvHeadPerLayer,
+      swa: Array.isArray(swaPattern) ? attnLayerIdx.filter((i) => swaPattern[i]).length : 0,
+    },
     isMoe: expertCount > 0,
     expertCount,
     expertShared,

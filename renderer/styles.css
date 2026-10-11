@@ -610,3 +610,6 @@ input[type="check"] { width: 17px; height: 17px; accent-color: var(--accent); cu
   cursor: pointer;
 }
 .warnings .tag:hover { border-color: var(--accent2); color: var(--accent2); }
+
+/* 投机解码类型被自动纠正时的醒目提示 */
+.spec-note.bad { color: #ffb3ae; }

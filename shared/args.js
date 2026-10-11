@@ -28,6 +28,10 @@ function buildArgs(p, modelPath, mode) {
   }
   // 内置 MTP 等无需草稿文件的投机解码：单独给 --spec-type 即可
   if (p.specType && p.specType !== 'none') a.push('--spec-type', String(p.specType));
+  // 草稿长度上限：仅在显式改过默认值(3)时下发，避免掩盖引擎默认行为
+  if (p.specDraftNMax !== undefined && p.specDraftNMax !== '' && Number(p.specDraftNMax) !== 3) {
+    a.push('--spec-draft-n-max', fmt(p.specDraftNMax));
+  }
 
   // --- 引擎与内存 ---
   if (p.ngl !== undefined && p.ngl !== '' && p.ngl !== 'auto') {

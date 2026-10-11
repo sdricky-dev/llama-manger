@@ -47,17 +47,17 @@ function companionBytes(model, params) {
   return bytes;
 }
 
-// KV 缓存每元素字节数（含块标度的近似值）
+// KV 缓存每元素字节数（按 ggml 的块量化定义精确值：块字节数 / 块元素数）
 const KV_ELEM_BYTES = {
   f32: 4.0,
   f16: 2.0,
   bf16: 2.0,
-  q8_0: 1.03, // 33B/32elem
-  q4_0: 0.53, // 17B/32elem
-  q4_1: 0.56, // 18B/32elem
-  iq4_nl: 0.75,
-  q5_0: 0.69, // 22B/32elem
-  q5_1: 0.72, // 23B/32elem
+  q8_0: 34 / 32, // 1.0625（引擎实测每 token 每层 heads×dim 乘此值）
+  q4_0: 18 / 32, // 0.5625
+  q4_1: 20 / 32, // 0.625
+  q5_0: 22 / 32, // 0.6875
+  q5_1: 24 / 32, // 0.75
+  iq4_nl: 18 / 32, // 0.5625
 };
 
 // MoE 模型中专家(expert)权重占文件大小的近似比例
@@ -66,7 +66,13 @@ const MOE_EXPERT_FRAC = 0.85;
 function kvBytesPerToken(model, kType, vType) {
   const k = KV_ELEM_BYTES[kType] ?? 2.0;
   const v = KV_ELEM_BYTES[vType] ?? 2.0;
-  // 混合 SSM/注意力架构只按注意力层计 KV
+  // 优先用解析器算好的「每 token 元素数」：它已经考虑了
+  // 混合 SSM（只有注意力层存 KV）、MTP 层、逐层 KV 头数、SWA 层头维差异
+  if (model.kvUnitsK || model.kvUnitsV) {
+    const ku = model.kvUnitsK || 0;
+    const vu = model.kvUnitsV || model.kvUnitsK || 0;
+    return ku * k + vu * v;
+  }
   const layers = model.nAttnLayer || model.nLayer;
   return layers * model.nKvHead * model.headDim * (k + v);
 }

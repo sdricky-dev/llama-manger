@@ -18,9 +18,9 @@ llama.cpp 一键启动器（Electron 桌面应用）。
 | 一键配置 | 内存模型估算（权重 + 附属文件 + KV + 计算缓冲）→ 推荐 ngl / ctx / KV 精度 / MoE 专家卸载 / 线程 / 采样 |
 | 参数说明 | 每个参数中文说明（hover 提示）+ 关联说明（控件下方小字） |
 | 关联提示 | 上下文>训练长度→YaRN 警告；超内存→红色提示+一键修复（降 ctx / q8_0 KV / 增专家卸载）；并行→KV×N 提示；线程超 P 核提示；**内置 MTP → 一键开启 `--spec-type draft-mtp`**；草稿模型类型不匹配→提示纠正；**decision 模型类型不受引擎支持→红色预警** |
-| 换算工具 | 当前 ctx ↔ KV 占用 GB；内存预算 → 最大可容纳上下文（实时） |
+| 换算工具 | 当前 ctx ↔ KV 占用 GB；内存预算 → 最大可容纳上下文（实时）。KV 口径按「真实带 KV 的层 × 每层 KV 头 × 头维」逐层累加，与引擎日志一致（256K q8_0 = 8704 MiB） |
 | 内存面板 | 堆叠条：GPU 权重 / 内存池权重 / KV / 计算 / 空闲（附属文件单列），修改参数实时重算 |
-| 视觉 / 加速 | `-mm` 视觉投影（默认 GPU 卸载）、`-md` 草稿模型 + `--spec-type`；**投机解码下拉框按当前模型能力过滤**：只有内置 MTP 或配套草稿模型时才列出 draft-*，ngram-* 恒可用，不可用项隐藏并在旁注明原因 |
+| 视觉 / 加速 | `-mm` 视觉投影（默认 GPU 卸载）、`-md` 草稿模型 + `--spec-type`；**投机解码下拉框按当前模型能力过滤**：只有内置 MTP 或配套草稿模型时才列出 draft-*，ngram-* 恒可用，不可用项隐藏并在旁注明原因；**草稿有专用实现（dflash/eagle3/dspark）时禁用通用 `draft-simple` 并自动纠正已有取值**（选错会静默变慢，见「投机解码」节的实测表）；`--spec-draft-n-max` 可在高级选项里调，附实测拐点说明 |
 | 启动 | server：进程托管 + 日志流 + 就绪检测 + 优雅停止；cli：生成脚本在 Terminal.app 打开（真实 TTY） |
 | 内嵌聊天 | OpenAI 兼容 `/v1/chat/completions` 流式对话，支持 API Key、中止、多轮；推理模型的思考内容以 💭 斜体单独展示；**请求固定 `id_slot`**，使这段上下文留在该 slot 里可被存盘 |
 | 会话存盘 | `--slot-save-path` + `/slots/{id}?action=save\|restore\|erase`：把一段长会话（提示词缓存 + KV）整体存成磁盘文件，之后**秒级恢复、无需重新 prefill**。反复用同一份长文档（报告/代码库/合同）时最省时间；面板内可直接列出/恢复/删除存盘文件 |
@@ -88,12 +88,13 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **108 项全绿**）：
+`node:test` 单元测试（不依赖 Electron，当前 **125 项全绿**）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
 - `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
 - `test/recommend-discrete.test.js` — PC 双预算规划（9 种显存/内存组合 + 规划器与内存面板口径一致性不变量）
 - `test/memory.test.js` — 内存模型：ngl 比例、KV 精度/并行缩放、超限判定
+- `test/kv-geometry.test.js` — KV「哪些层、每层多大」：混合 SSM 的 recurrent 语义、MTP 层排除、`full_attention_interval` 兜底、gemma4 逐层 KV 头与 SWA 头维（含与引擎日志对齐的 8704 MiB 校验）
 - `test/args.test.js` — CLI 参数映射（对照 llama.cpp 源码核对过标志名）
 - `test/role.test.js` — 文件角色 / 量化实测 / decision 类型 / 附属文件归组
 - `test/spec.test.js` — 投机解码类型与模型能力的匹配矩阵
@@ -128,6 +129,7 @@ test/            node:test 单元测试 + GGUF 夹具生成器
   role.test.js   文件角色识别 / tensor 实测量化 / decision 类型 / 附属文件归组
   spec.test.js   投机解码类型与模型能力的匹配矩阵
   slots.test.js  会话存盘的磁盘操作（文件名校验 / 列目录 / 删除 / 防路径穿越）
+  kv-geometry.test.js  KV 层数与几何（混合 SSM / MTP / SWA）
   reveal.test.js 文件定位目标解析（高亮 / 打开目录 / 缺失报错）
   paths.test.js  路径工具（Windows 反斜杠）
 scripts/build-engine.sh  引擎重建脚本（macOS / Linux）
@@ -141,16 +143,21 @@ e2e/             CDP 端到端脚本（`node e2e/cdp-eval.js <步骤脚本>`，�
 ## 内存模型（一键配置的算法核心）
 
 ```
-KV 字节/ token = 注意力层数 × KV头数 × 头维 × (K精度字节 + V精度字节)
+KV 字节/ token = Σ_注意力层( KV头数 × K头维 ) × K精度字节 + Σ_注意力层( KV头数 × V头维 ) × V精度字节
 总占用 = 主模型 + mmproj + 草稿模型 + KV × 上下文 × 并行数 + 计算缓冲(≈1.5GB + 0.5GB×batch/2048)
 可用内存 = 总内存 − max(8GB, 20%×总内存)
 ```
 
-- **注意力层数**而非总层数：混合 SSM/注意力架构（如 `qwen35`）只有部分层带 KV 缓存（读 `attention.recurrent_layers`），按总层数会高估 ~35%。
+- **哪些层真的有 KV**（这一步最容易错，错了就是几倍误差）：
+  1. 排除 MTP/nextn 层（`nextn_predict_layers`）—— 引擎给它们单独建上下文；
+  2. 混合 SSM/注意力架构（`qwen35` 等）只有**非 recurrent** 层存 KV：`attention.recurrent_layers[i] = true` 表示该层是 SSM 层（**要数 false 的个数**，数 true 会得到 SSM 层数，直接错 3 倍）；
+  3. 没有 `recurrent_layers` 时用 `full_attention_interval` 推（每 N 层一个全注意力层）。
+- **每层的 KV 头数与头维可能逐层不同**（gemma4 滑动窗口：`attention.head_count_kv` 是数组，SWA 层用 `key_length_swa`），逐层累加而不是拿最大值乘层数。
+- 实测校验：Swift-1.5-Qwen3.8-27B（65 层 / 16 个注意力层 / 4 KV 头 / 头维 256）在 256K 上下文下 **q8_0 KV = 8704 MiB**，与 `llama-server -v` 日志的 `llama_kv_cache: size = 8704.00 MiB (262144 cells, 16 layers, ...)` 完全一致（f16 则 17.18GB）。
 - **头维**优先取 `attention.key_length`：混合架构下 `embedding_length/head_count` 会失真（213 vs 实际 256）。
 - **上下文优先拉满到模型训练长度**：从训练长度向下找可容纳档位（档位 4K…256K，上限跟随 `context_length`），装不下再降 KV 精度（只自动用 f16 → q8_0；q4_0 质量损失可感，只在连最小档都装不下时兜底，其余情况仅作为「理论上可到 X」的提示）。
 - **附属文件计入预算**：mmproj / 草稿模型的大小会从内存预算里先扣掉，再决定上下文档位。
-- **投机解码按能力给默认值**：模型自带 MTP 层 → `draft-mtp`；配了草稿模型 → 按其架构（dflash/eagle3/dspark/simple）；都没有 → `none`。
+- **投机解码按能力给默认值**：模型自带 MTP 层 → `draft-mtp`；配了草稿模型 → 按其架构（dflash/eagle3/dspark/simple）；都没有 → `none`。草稿架构有专用实现时（dflash/eagle3/dspark），通用 `draft-simple` 会被**禁用并自动纠正**（见下节实测）。
 - MoE：文件较大（> 0.6×可用内存）时把全部专家层留在内存池（`-ncmoe N`，GPU 只留 ~15% 权重）——统一内存下专家权重计算强度低，走内存几乎不损失速度。
 - Apple Silicon 统一内存 → `ngl=all`（全量 Metal 卸载）；线程 = P 核数，批处理线程 = 总核数。
 - 上下文 > 训练长度 → 提示 YaRN（预填 `--yarn-orig-ctx`，不自动开启）。
@@ -166,6 +173,28 @@ KV 字节/ token = 注意力层数 × KV头数 × 头维 × (K精度字节 + V�
 | 量化 | 读 **tensor 表**按元素数加权统计（跳过 1 维张量）→ 发布者的 `general.file_type` 常年不准 |
 | 角色 | `general.type=mmproj` / `arch=clip` → 视觉投影；`arch=dflash/eagle3/dspark` → 草稿模型；其余为主模型 |
 | 判决模型 | `*.decision.type`（如 `jev`）必须是引擎支持的取值，否则 llama-server 直接退出 |
+
+## 投机解码：实测数据与「选错类型」的代价
+
+草稿模型的架构决定了 `--spec-type` 该选什么，**选错不会报错，只会变慢**。同一台机器（Apple M5 Max / 68GB）、同一个提示词、`temperature=0`、256K 上下文 q8_0 KV、`n_predict=192`，两轮复测结果一致：
+
+| `--spec-type` | 生成速度 | 草稿接受率 | 平均接受长度 |
+|---|---|---|---|
+| `none`（不开加速） | 32.4 tok/s | — | — |
+| `draft-simple` + DFlash2 草稿 | **16.2 tok/s** | **0.4%**（1/283） | 1.01 |
+| `draft-dflash` + DFlash2 草稿 | 44.9 tok/s | 51.6% | 2.53 |
+| `draft-dflash` + `--spec-draft-n-max 8` | 52.4 tok/s | 31.8% | 3.18 |
+| `draft-mtp`（模型自带 MTP 头） | 52.2 tok/s | 68.4% | 3.03 |
+| `draft-mtp` + `--spec-draft-n-max 8` | 38.8 tok/s | 39.9% | 4.06 |
+| `draft-mtp` + `--spec-draft-n-max 16` | 19.0 tok/s | 22.0% | 4.24 |
+
+结论：
+
+- **DFlash2 是 `dflash` 架构**（专用实现，靠块扩散一次并行出 8 个块的 token）。用通用 `draft-simple` 跑，它的机制完全用不上 → 草稿几乎全被拒（0.4%），你白付了草稿模型的计算和显存，**比不开加速还慢一倍**。
+- **模型自带 MTP 时通常最划算**：不用额外加载草稿模型、接受率最高。这里 `draft-mtp` 52 tok/s 略快于 `draft-dflash` 45 tok/s（把后者的 `n-max` 调到 8 可追平）。
+- **`--spec-draft-n-max` 调大不等于更快**：接受率反而下降、验证开销上升，两种类型的拐点还不一样（dflash 3→8 变快，mtp 3→8→16 明显变慢）。所以默认值只在显式改过时才下发，参数说明里附了实测数字。
+
+因此应用做了两层防护：**草稿架构有专用实现时下拉框不再提供 `draft-simple`**（并在原因里写明正确取值）；**已有的错误取值在选择模型时自动纠正**，弹出提示说明原因（`settings.json` 里存的是旧值也会被改过来）。
 
 ## 会话存盘（反复用同一份长文档）
 

@@ -59,12 +59,17 @@ function scanDir(dir) {
     else bucket.draft.push(m);
   }
 
+  // 注意：arch 必须带上 —— 投机解码类型要靠草稿模型的架构判定
+  // （缺了它，dflash 草稿会被当成"普通草稿"，推荐出 draft-simple，实测比不加速还慢一倍）
   const brief = (c) => ({
     path: c.path,
     name: c.name,
+    arch: c.arch,
     quant: c.quant,
     sizeBytes: c.sizeBytes,
     sizeGB: c.sizeGB,
+    nLayer: c.nLayer,
+    hasMtp: !!c.hasMtp,
     vision: c.vision || null,
   });
 

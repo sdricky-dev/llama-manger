@@ -65,7 +65,11 @@ function buildGguf(opts, destPath) {
   push(`${arch}.file_type`, 10, fileType);
   if (expertCount !== undefined) push(`${arch}.expert_count`, 10, expertCount);
   if (expertShared !== undefined) push(`${arch}.expert_shared_count`, 10, expertShared);
-  for (const [k, v] of Object.entries(extraKv)) push(k, v.type ?? 8, v.value ?? k);
+  for (const [k, v] of Object.entries(extraKv)) {
+    // 数组写法 {type:9, elem:7, values:[...]} 需要把整个对象交给编码器
+    const payload = v.values !== undefined ? v : v.value !== undefined ? v.value : k;
+    push(k, v.type ?? 8, payload);
+  }
 
   // 序列化 KV
   const kvBufs = [];
@@ -80,12 +84,24 @@ function buildGguf(opts, destPath) {
     else if (type === 11) kvBufs.push(encI64(value));
     else if (type === 12) kvBufs.push(encF64(value));
     else if (type === 9) {
-      // array of u64: [elem_type i32=10][count u64][values]
+      // array: [elem_type i32][count u64][values]
+      // 旧用法 {type:9, value:123} = 单元素 u64 数组；
+      // 新用法 {type:9, elem:7, values:[true,false,...]}（7=bool 1字节, 5=i32, 10=u64）
+      const elemType = value && value.elem !== undefined ? value.elem : 10;
+      const values = value && value.values !== undefined ? value.values : [value];
       const et = Buffer.alloc(4);
-      et.writeUInt32LE(10, 0);
+      et.writeUInt32LE(elemType, 0);
       kvBufs.push(et);
-      kvBufs.push(encU64(1));
-      kvBufs.push(encU64(value));
+      kvBufs.push(encU64(values.length));
+      for (const item of values) {
+        if (elemType === 7 || elemType === 0) kvBufs.push(encU8(item ? 1 : 0));
+        else if (elemType === 5) {
+          const b = Buffer.alloc(4);
+          b.writeInt32LE(item, 0);
+          kvBufs.push(b);
+        } else if (elemType === 10) kvBufs.push(encU64(item));
+        else throw new Error(`unsupported array elem type ${elemType}`);
+      }
     } else {
       throw new Error(`unsupported type ${type}`);
     }

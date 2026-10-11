@@ -17,6 +17,8 @@ const state = {
   autoPaired: null,
   specOptions: null,
   specRecommended: 'none',
+  specHint: null, // 同时有内置 MTP 与草稿时的实测对比提示
+  specCorrected: null, // 自动纠正过的投机解码类型（{from,to,why}）
   model: null,
   mode: 'server',
   params: null,
@@ -332,9 +334,18 @@ async function syncSpecOptions() {
   const r = await api.spec.options({ model: state.model, params: state.params });
   state.specOptions = r.options;
   state.specRecommended = r.recommended;
+  state.specHint = r.hint || null;
+  state.specCorrected = null;
   const available = r.options.filter((o) => o.available).map((o) => o.value);
   if (!available.includes(state.params.specType)) {
+    const before = state.params.specType;
+    const why = r.options.find((o) => o.value === before)?.reason || '';
     state.params.specType = r.recommended;
+    if (before && before !== 'none') {
+      state.specCorrected = { from: before, to: r.recommended, why };
+      // 选错了会「比不开加速更慢」，必须让用户看见这次自动纠正
+      toast(`投机解码类型已自动改为 ${r.recommended}（原 ${before} 不适用于该草稿）`, 'bad');
+    }
   }
   renderParams();
 }
@@ -372,12 +383,21 @@ function controlFor(key, p) {
         const unusable = state.specOptions.filter((o) => !o.available);
         const opts = avail.map((o) =>
           `<option value="${o.value}" ${String(val) === o.value ? 'selected' : ''} title="${esc(o.reason || '')}">${esc(o.label)}</option>`).join('');
-        const note = avail.length <= 1
-          ? '<span class="spec-note">该模型不支持投机解码（无 MTP 层、无草稿模型）</span>'
-          : unusable.length
-            ? `<span class="spec-note" title="${esc(unusable.map((o) => `${o.value}: ${o.reason}`).join('；'))}">已隐藏 ${unusable.length} 项不可用（${unusable.map((o) => esc(o.value)).join('、')}）</span>`
-            : '';
-        return `<select data-k="${key}">${opts}</select>${note}`;
+        const notes = [];
+        if (state.specCorrected && state.specCorrected.to === val) {
+          notes.push(
+            `<span class="spec-note bad">已自动改为 ${esc(state.specCorrected.to)}：原 ${esc(state.specCorrected.from)} ${esc(state.specCorrected.why)}</span>`
+          );
+        }
+        if (avail.length <= 1) {
+          notes.push('<span class="spec-note">该模型不支持投机解码（无 MTP 层、无草稿模型）</span>');
+        } else if (unusable.length) {
+          notes.push(
+            `<span class="spec-note" title="${esc(unusable.map((o) => `${o.value}: ${o.reason}`).join('；'))}">已隐藏 ${unusable.length} 项不可用（${unusable.map((o) => esc(o.value)).join('、')}）</span>`
+          );
+        }
+        if (state.specHint) notes.push(`<span class="spec-note">${esc(state.specHint)}</span>`);
+        return `<select data-k="${key}">${opts}</select>${notes.join('')}`;
       }
       return `<select data-k="${key}">${d.options.map((o) =>
         `<option value="${o}" ${String(val) === String(o) ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
