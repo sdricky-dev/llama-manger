@@ -6,7 +6,7 @@
   "main": "main/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.js",
     "pack:mac": "electron-builder --mac",
     "pack:win": "electron-builder --win",
     "pack:linux": "electron-builder --linux",
