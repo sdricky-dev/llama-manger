@@ -40,6 +40,10 @@ function buildArgs(p, modelPath, mode) {
   if (o.specDraftNMax !== undefined && o.specDraftNMax !== '' && Number(o.specDraftNMax) !== 3) {
     a.push('--spec-draft-n-max', fmt(o.specDraftNMax));
   }
+  // 草稿上下文的物理 batch：引擎默认 0 = 跟随 -ub；只在显式给了正数时下发（省显存用）
+  if (o.specDraftNUbatch !== undefined && o.specDraftNUbatch !== '' && Number(o.specDraftNUbatch) > 0) {
+    a.push('--spec-draft-n-ubatch', fmt(o.specDraftNUbatch));
+  }
 
   // --- 引擎与内存 ---
   if (o.ngl !== undefined && o.ngl !== '' && o.ngl !== 'auto') {

@@ -13,12 +13,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 本地开发用的是 Node 26；跑 LTS 兜底，确认 node:test 用法向下兼容
-        node-version: ['20', '22']
+        # 22 = 上一代 LTS，24 = 当前 LTS（也是 Electron 44 内嵌的 Node 大版本）；
+        # 本地开发用 Node 26。不再测 Node 20：它已于 2026-04 EOL。
+        node-version: ['22', '24']
     steps:
-      - uses: actions/checkout@v4
+      # v7 起 action 自身跑在 node24 上（v4 是 node20，GitHub 已开始告警）
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm

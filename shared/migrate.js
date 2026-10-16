@@ -56,8 +56,19 @@ function migrateParams(params) {
   // 会同时存在，若把 'auto' 当成明确选择，用户的 mlock 意图会被静默丢掉。
   const loadModeChosen = typeof out.loadMode === 'string' && out.loadMode !== '' && out.loadMode !== 'auto';
   if (!loadModeChosen) {
-    const hasLegacy = ['mmap', 'mlock', 'directIo', 'dio', 'ndio'].some((k) => k in out);
-    if (hasLegacy) {
+    // 只有「携带意图」的旧字段才值得翻译：
+    //   - mmap 出现（true→mmap / false→none）
+    //   - mlock 为 true
+    //   - directIo / dio / ndio 出现（含 false，-ndio 语义是"恢复 mmap"）
+    // 而 `mlock: false` 这种「UI 默认值被顺手存进 settings.json」的情况没有任何意图，
+    // 翻译它只会凭空多出一个 `--load-mode mmap`（引擎默认本来就是 mmap）。
+    const hasIntent =
+      'mmap' in out ||
+      out.mlock === true ||
+      'directIo' in out ||
+      'dio' in out ||
+      'ndio' in out;
+    if (hasIntent) {
       const mlock = !!out.mlock;
       // directIo / dio / ndio 三个字段在历史版本里都有人用，统一读取
       let dio = null;

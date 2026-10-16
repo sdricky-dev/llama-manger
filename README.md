@@ -22,7 +22,7 @@ llama.cpp 一键启动器（Electron 桌面应用）。
 | 关联提示 | 上下文>训练长度→YaRN 警告；超内存→红色提示+一键修复（降 ctx / q8_0 KV / 增专家卸载）；并行→KV×N 提示；线程超 P 核提示；**内置 MTP → 一键开启 `--spec-type draft-mtp`**；草稿模型类型不匹配→提示纠正；**decision 模型类型不受引擎支持→红色预警** |
 | 换算工具 | 当前 ctx ↔ KV 占用 GB；内存预算 → 最大可容纳上下文（实时）。KV 口径按「真实带 KV 的层 × 每层 KV 头 × 头维」逐层累加，与引擎日志一致（256K q8_0 = 8704 MiB） |
 | 内存面板 | 堆叠条：GPU 权重 / 内存池权重 / KV / 计算 / 空闲（附属文件单列），修改参数实时重算 |
-| 视觉 / 加速 | `-mm` 视觉投影（默认 GPU 卸载）、`-md` 草稿模型 + `--spec-type`；**投机解码下拉框按当前模型能力过滤**：只有内置 MTP 或配套草稿模型时才列出 draft-*，ngram-* 恒可用，不可用项隐藏并在旁注明原因；**草稿有专用实现（dflash/eagle3/dspark）时禁用通用 `draft-simple` 并自动纠正已有取值**（选错会静默变慢，见「投机解码」节的实测表）；`--spec-draft-n-max` 可在高级选项里调，附实测拐点说明 |
+| 视觉 / 加速 | `-mm` 视觉投影（默认 GPU 卸载）、`-md` 草稿模型 + `--spec-type`；**投机解码下拉框按当前模型能力过滤**：只有内置 MTP 或配套草稿模型时才列出 draft-*，ngram-* 恒可用，不可用项隐藏并在旁注明原因；**草稿有专用实现（dflash/eagle3/dspark）时禁用通用 `draft-simple` 并自动纠正已有取值**（选错会静默变慢，见「投机解码」节的实测表）；`--spec-draft-n-max` 与 `--spec-draft-n-ubatch` 可在高级选项里调，附实测拐点与省显存取舍说明 |
 | 启动 | server：进程托管 + 日志流 + 就绪检测 + 优雅停止；cli：生成脚本在 Terminal.app 打开（真实 TTY） |
 | 内嵌聊天 | OpenAI 兼容 `/v1/chat/completions` 流式对话，支持 API Key、中止、多轮；推理模型的思考内容以 💭 斜体单独展示；**请求固定 `id_slot`**，使这段上下文留在该 slot 里可被存盘 |
 | 会话存盘 | `--slot-save-path` + `/slots/{id}?action=save\|restore\|erase`：把一段长会话（提示词缓存 + KV）整体存成磁盘文件，之后**秒级恢复、无需重新 prefill**。反复用同一份长文档（报告/代码库/合同）时最省时间；面板内可直接列出/恢复/删除存盘文件 |
@@ -37,7 +37,7 @@ npm install
 npm start
 ```
 
-> 环境要求：Node 20+（单测跑在 20/22 上）；macOS 需 13 (Ventura) 以上（Electron 44 起不再支持 macOS 12）；Windows/Linux 为 64 位（Electron 44 起不再发布 32 位 Windows 与 Linux ARMv7 预编译包）。
+> 环境要求：Node 22+（开发/跑测试；应用运行时用的是 Electron 内嵌的 Node，CI 在 22/24 上验证）；macOS 需 13 (Ventura) 以上（Electron 44 起不再支持 macOS 12）；Windows/Linux 为 64 位（Electron 44 起不再发布 32 位 Windows 与 Linux ARMv7 预编译包）。
 > 若 `npm install` 之后 Electron 二进制没下载（npm 11 的 allowScripts 或网络原因），执行：`cd node_modules/electron && ELECTRON_MIRROR=https://cdn.npmmirror.com/binaries/electron/ node install.js`
 
 1. 在 **① 选择模型** 填入模型目录（默认 `~/models`），点「重新扫描」。
@@ -93,7 +93,7 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **373 项全绿**）：
+`node:test` 单元测试（不依赖 Electron，当前 **382 项全绿**，CI 在 Node 22/24 上跑）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
 - `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
@@ -206,6 +206,7 @@ KV 字节/ token = Σ_注意力层( KV头数 × K头维 ) × K精度字节 + Σ_
 - **DFlash2 是 `dflash` 架构**（专用实现，靠块扩散一次并行出 8 个块的 token）。用通用 `draft-simple` 跑，它的机制完全用不上 → 草稿几乎全被拒（0.4%），你白付了草稿模型的计算和显存，**比不开加速还慢一倍**。
 - **模型自带 MTP 时通常最划算**：不用额外加载草稿模型、接受率最高。这里 `draft-mtp` 52 tok/s 略快于 `draft-dflash` 45 tok/s（把后者的 `n-max` 调到 8 可追平）。
 - **`--spec-draft-n-max` 调大不等于更快**：接受率反而下降、验证开销上升，两种类型的拐点还不一样（dflash 3→8 变快，mtp 3→8→16 明显变慢）。所以默认值只在显式改过时才下发，参数说明里附了实测数字。
+- **显存吃紧先调 `--spec-draft-n-ubatch`（草稿上下文 batch），别急着降 `n-max`**：前者只影响草稿侧的 prefill 预热（多花点时间），后者直接改变接受率与加速比。默认 0 = 跟随 `-ub`，只在显式给正数时才下发。
 
 ### `--spec-draft-n-max` 该设多少（`draft-mtp` 扫描）
 

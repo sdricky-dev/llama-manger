@@ -151,6 +151,19 @@ export const PARAMS = {
     advanced: true,
     showIf: (s) => !!s.params?.specDraft || s.params?.specType === 'draft-mtp',
   },
+  specDraftNUbatch: {
+    label: '草稿上下文 batch',
+    flag: '--spec-draft-n-ubatch',
+    type: 'number',
+    min: 0,
+    max: 4096,
+    step: 32,
+    def: 0,
+    desc: '草稿（draft）上下文的物理 batch 大小，0 = 跟随上面的「批处理 ubatch」（引擎默认）。草稿上下文会额外占一份计算缓冲，把它调小可以直接省显存——代价是草稿侧 prefill 变慢，只影响投机解码的预热，不影响最终输出质量。',
+    related: '显存吃紧时优先调这个，而不是降草稿长度（--spec-draft-n-max）：前者只多花点预热时间，后者会直接改变接受率与加速比。',
+    advanced: true,
+    showIf: (s) => !!s.params?.specDraft || s.params?.specType === 'draft-mtp',
+  },
 
   // ---------- 性能 ----------
   threads: {
@@ -435,7 +448,7 @@ export const PARAMS = {
 
 export const GROUPS = [
   { id: 'engine', name: '引擎与内存', params: ['ngl', 'nCpuMoe', 'kvOffload', 'flashAttn', 'ctx', 'cacheTypeK', 'cacheTypeV', 'parallel', 'swaFull'] },
-  { id: 'attach', name: '附属文件（视觉 / 加速）', params: ['mmproj', 'mmprojOffload', 'specDraft', 'specDraftNgl', 'specType', 'specDraftNMax'] },
+  { id: 'attach', name: '附属文件（视觉 / 加速）', params: ['mmproj', 'mmprojOffload', 'specDraft', 'specDraftNgl', 'specType', 'specDraftNMax', 'specDraftNUbatch'] },
   { id: 'perf', name: '性能', params: ['threads', 'threadsBatch', 'batch', 'ubatch'] },
   { id: 'sampling', name: '采样', params: ['temp', 'topK', 'topP', 'minP', 'repeatPenalty', 'seed'] },
   { id: 'server', name: 'API 服务 (llama-server)', params: ['host', 'port', 'apiKey', 'metrics', 'tools'], mode: 'server' },

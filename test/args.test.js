@@ -152,6 +152,28 @@ test('草稿长度：默认 3 不下发，改了才下发', () => {
   assert.ok(hasPair(buildArgs({ ...base, specDraftNMax: 8 }, '/tmp/m.gguf', 'cli'), '--spec-draft-n-max', '8'));
 });
 
+// ---------- 草稿上下文 batch（--spec-draft-n-ubatch，上游 3fb47677e 新增） ----------
+
+test('草稿 batch：默认 0 / 未设置时不下发（引擎默认跟随 -ub）', () => {
+  const base = { ...BASE, specType: 'draft-mtp' };
+  assert.ok(!buildArgs(base, '/tmp/m.gguf', 'server').includes('--spec-draft-n-ubatch'), '未定义不下发');
+  assert.ok(!buildArgs({ ...base, specDraftNUbatch: 0 }, '/tmp/m.gguf', 'server').includes('--spec-draft-n-ubatch'), '0=跟随 ubatch，不下发');
+  assert.ok(!buildArgs({ ...base, specDraftNUbatch: '' }, '/tmp/m.gguf', 'server').includes('--spec-draft-n-ubatch'), '空串不下发');
+  assert.ok(!buildArgs({ ...base, specDraftNUbatch: -1 }, '/tmp/m.gguf', 'server').includes('--spec-draft-n-ubatch'), '负数不下发');
+});
+
+test('草稿 batch：显式正数才下发（server 与 cli 都支持）', () => {
+  const base = { ...BASE, specType: 'draft-mtp', specDraftNUbatch: 128 };
+  assert.ok(hasPair(buildArgs(base, '/tmp/m.gguf', 'server'), '--spec-draft-n-ubatch', '128'));
+  assert.ok(hasPair(buildArgs(base, '/tmp/m.gguf', 'cli'), '--spec-draft-n-ubatch', '128'));
+});
+
+test('草稿 batch：与 --spec-draft-n-max 互不影响，可同时下发', () => {
+  const a = buildArgs({ ...BASE, specType: 'draft-dflash', specDraft: '/tmp/d.gguf', specDraftNMax: 6, specDraftNUbatch: 256 }, '/tmp/m.gguf', 'server');
+  assert.ok(hasPair(a, '--spec-draft-n-max', '6'));
+  assert.ok(hasPair(a, '--spec-draft-n-ubatch', '256'));
+});
+
 // ---------- 加载模式（上游 14a9d09f7 起 --mlock/--mmap/-dio 已被删除） ----------
 
 /** 已从 llama.cpp 删除的加载 flag：一个都不允许再下发，否则引擎 "invalid argument" 退出 */
@@ -183,6 +205,12 @@ test('加载模式：用户明确选过 loadMode 时以它为准（旧字段不�
 
 test('加载模式：没有任何加载字段时不下发 --load-mode', () => {
   assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'cli').includes('--load-mode'));
+});
+
+test('加载模式：只有 mlock=false（UI 默认值被存下来）时也不下发', () => {
+  // 真实的 settings.json 形状：UI 把未勾选的 mlock 与默认 loadMode 都存了下来
+  const a = buildArgs({ ...BASE, mlock: false, loadMode: 'auto' }, '/tmp/m.gguf', 'cli');
+  assert.ok(!a.includes('--load-mode'), `不该凭空生成 --load-mode，实际：${a.join(' ')}`);
 });
 
 test('加载模式：迁移结果真的被采用（旧字段被剥离后不再参与拼接）', () => {

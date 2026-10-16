@@ -92,6 +92,20 @@ test('migrateParams：loadMode 是明确的非 auto 值时不被旧字段覆盖'
   assert.equal(r.migrations.length, 0);
 });
 
+test('migrateParams：mlock=false 单独出现不算意图，不翻译', () => {
+  // UI 的 mlock 勾选框默认 false，会被顺手存进 settings.json；
+  // 若把它当成"用户选了不锁定"，就会凭空生成 --load-mode mmap
+  const r = migrateParams({ mlock: false, loadMode: 'auto' });
+  assert.equal(r.migrations.length, 0, '不产生迁移记录');
+  assert.equal(r.params.loadMode, 'auto', 'loadMode 保持原样');
+  assert.equal('mlock' in r.params, false, '旧字段仍然清理掉');
+});
+
+test('migrateParams：mmap 出现（即使是 false）算意图', () => {
+  assert.equal(migrateParams({ mmap: false }).params.loadMode, 'none');
+  assert.equal(migrateParams({ mmap: true, mlock: false }).params.loadMode, 'mmap');
+});
+
 test('migrateParams：mlock true + mmap true → loadMode=mmap+mlock', () => {
   const r = migrateParams({ mlock: true, mmap: true });
   assert.equal(r.params.loadMode, 'mmap+mlock');
