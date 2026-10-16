@@ -9,9 +9,9 @@ await sleep(5000);
 const items = [...$('modelList').querySelectorAll('.model-item')];
 items.find((el) => el.querySelector('.m-name').textContent.includes('ZDTaichu')).click();
 await sleep(1200);
-// 高级选项里填「会话存盘目录」
+// 高级选项里填「会话存盘目录」（用注入的 SLOTS_DIR，别写死路径，见 e2e/README.md）
 const dirInput = document.querySelector('[data-ctl="slotSavePath"] input');
-dirInput.value = '/tmp/lm-slots-e2e';
+dirInput.value = SLOTS_DIR;
 dirInput.dispatchEvent(new Event('input', { bubbles: true }));
 await sleep(1000);
 $('btnOneClick').click();
@@ -29,7 +29,7 @@ while (Date.now() - t0 < 120000) {
 return {
   paramGroups: panels,
   slotDirParam: dirInput.value,
-  cmdHasSlotPath: cmd.includes('--slot-save-path /tmp/lm-slots-e2e'),
+  cmdHasSlotPath: cmd.includes(`--slot-save-path ${SLOTS_DIR}`),
   cmd: cmd.slice(0, 190),
   engineState: st,
   slotStatus: $('slotStatus')?.textContent,

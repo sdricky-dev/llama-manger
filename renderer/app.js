@@ -908,13 +908,26 @@ function buildChatRequestBody(style) {
   return buildOpenAiBase();
 }
 
+/**
+ * 用已编码好的 data URI 拼 OpenAI 多模态 user 消息。
+ * 图片在选图时已由主进程 `mm:encode-files` 编码成 data URI，
+ * 这里不再需要读盘（preload 在沙箱里也拿不到 fs）。
+ */
+function buildMultimodalMessage(text, images) {
+  const ok = (images || []).filter((im) => im && im.dataUri);
+  if (!ok.length) return { role: 'user', content: String(text || '') };
+  const parts = [];
+  if (text) parts.push({ type: 'text', text: String(text) });
+  for (const im of ok) parts.push({ type: 'image_url', image_url: { url: im.dataUri } });
+  return { role: 'user', content: parts };
+}
+
 function buildOpenAiBase() {
   // 处理最后一条 user 消息：若有待发送图片，把它升级为 multimodal content
   const messages = state.chatHistory.slice();
   if (chatImages.length && messages.length && messages[messages.length - 1].role === 'user') {
     const last = messages[messages.length - 1];
-    const paths = chatImages.map((img) => img.path);
-    messages[messages.length - 1] = window.lm.mm.toMultimodalMessage(last.content, paths);
+    messages[messages.length - 1] = buildMultimodalMessage(last.content, chatImages);
   }
   return {
     model: state.model?.path,
@@ -934,12 +947,12 @@ function buildOpenAiBase() {
 function agentEnabled() {
   return state.params?.tools && state.params.tools !== 'none';
 }
-/** 工具自动放行集合（取决于 --tools 值；展开逻辑与主进程共用 shared/agent.js） */
-function agentAutoApprove() {
+/** 工具自动放行集合（取决于 --tools 值；由主进程用 shared/agent.js 计算，避免两边列表漂移） */
+async function agentAutoApprove() {
   return api.agent.autoApprove(state.params?.tools || 'none');
 }
 /** 更新 Agent 模式徽章 */
-function updateAgentBadge(state_) {
+async function updateAgentBadge(state_) {
   const el = $('agentBadge');
   if (!el) return;
   if (!agentEnabled()) {
@@ -949,7 +962,7 @@ function updateAgentBadge(state_) {
   el.classList.remove('hidden');
   el.classList.toggle('active', agentEnabled() && state_ !== 'busy');
   el.classList.toggle('busy', state_ === 'busy');
-  const n = agentAutoApprove().length;
+  const n = (await agentAutoApprove()).length;
   el.textContent = state_ === 'busy' ? 'Agent 模式（执行中）' : `Agent 模式（${n} 项工具）`;
 }
 
@@ -1033,7 +1046,7 @@ async function runAgent({ base, render, onDone }) {
       const confirm = await api.agent.confirm({
         name: call.name,
         args: call.args,
-        autoApproveList: agentAutoApprove(),
+        autoApproveList: await agentAutoApprove(),
       });
       if (!confirm.approved) {
         results.push({ id: call.id, name: call.name, isError: true, content: `用户拒绝执行 ${call.name}。请改用其他方式或不调用此工具。` });
@@ -1751,10 +1764,11 @@ async function loadConfig() {
   if (state.config.modelPath) {
     $('modelDir').value = state.config.modelDir;
   }
-  // 填充 API 风格下拉框
+  // 填充 API 风格下拉框（列表来自主进程，preload 不能 require shared/anthropic.js）
   const sel = $('apiStyle');
-  if (sel && window.lm.apiStyles) {
-    sel.innerHTML = window.lm.apiStyles
+  const styles = await api.app.apiStyles();
+  if (sel && styles) {
+    sel.innerHTML = styles
       .map((s) => `<option value="${s.value}">${s.label}</option>`)
       .join('');
     sel.value = state.config.apiStyle || 'openai';

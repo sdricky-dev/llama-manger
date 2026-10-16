@@ -35,7 +35,7 @@ await sleep(4000);
 out.afterRestore = $('slotStatus').textContent;
 
 // 5) 删除磁盘文件（直接调 IPC，避开 confirm 弹窗）
-const r = await window.lm.slots.remove({ dir: '/tmp/lm-slots-e2e', name: 'e2e-doc.bin' });
+const r = await window.lm.slots.remove({ dir: SLOTS_DIR, name: 'e2e-doc.bin' });
 out.removed = r.removed || null;
 $('btnSlotRefresh').click();
 await sleep(1500);

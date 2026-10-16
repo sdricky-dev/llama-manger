@@ -143,6 +143,10 @@ app.whenReady().then(() => {
   // ---------- Agent 模式：工具权限 ----------
   // 渲染层检测到 tool_calls 时，对每个非 read 工具都发一次 ask 决定 yes/no
   const { dialog } = require('electron');
+  // preload 在沙箱里不能 require ../shared/*，所以这两个纯函数由主进程算好交给渲染层
+  const { autoApproveSet } = require('../shared/agent');
+  ipcMain.handle('agent:auto-approve', (_e, toolsArg) => Array.from(autoApproveSet(toolsArg)));
+  ipcMain.handle('app:api-styles', () => require('../shared/anthropic').ANTHROPIC_API_STYLES);
   ipcMain.handle('agent:confirm', async (_e, { name, args, autoApproveList }) => {
     const isAuto = Array.isArray(autoApproveList) && autoApproveList.includes(name);
     if (isAuto) return { approved: true, auto: true };

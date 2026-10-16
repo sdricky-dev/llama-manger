@@ -1,14 +1,13 @@
 'use strict';
+/**
+ * 注意：渲染进程默认开启 sandbox，**沙箱化的 preload 不能 require 相对路径文件**
+ * （只能 require electron / events / timers / url 等内置模块）。
+ * 因此这里不引入 ../shared/*，需要复用的纯函数一律通过 IPC 由主进程计算：
+ *   - API 风格列表   → ipcRenderer.invoke('app:api-styles')
+ *   - 工具自动放行集 → ipcRenderer.invoke('agent:auto-approve')
+ * 多模态图片在选图时已由主进程编码成 data URI，渲染层直接用即可。
+ */
 const { contextBridge, ipcRenderer } = require('electron');
-const { ANTHROPIC_API_STYLES } = require('./shared/anthropic');
-const { expandToolsArg, autoApproveSet, toolRequiresConfirm } = require('./shared/agent');
-const {
-  SUPPORTED_IMAGE_MIMES,
-  detectMimeByExt,
-  toMultimodalContent,
-  toMultimodalMessage,
-  dataUriSize,
-} = require('./shared/multimodal');
 
 function on(channel, cb) {
   const listener = (_e, data) => cb(data);
@@ -18,14 +17,9 @@ function on(channel, cb) {
 
 // 这些常量直接从主进程注册到 window（不需要走 IPC）
 contextBridge.exposeInMainWorld('lm', {
-  apiStyles: ANTHROPIC_API_STYLES,
-  // 多模态辅助（直接挂在主进程上下文中，不需要走 IPC）
-  mm: {
-    SUPPORTED_IMAGE_MIMES: Array.from(SUPPORTED_IMAGE_MIMES),
-    detectMimeByExt,
-    toMultimodalContent,
-    toMultimodalMessage,
-    dataUriSize,
+  app: {
+    // shared/anthropic.js 的 ANTHROPIC_API_STYLES（preload 不能 require，改由主进程给）
+    apiStyles: () => ipcRenderer.invoke('app:api-styles'),
   },
   hw: {
     scan: () => ipcRenderer.invoke('hw:scan'),
@@ -68,10 +62,8 @@ contextBridge.exposeInMainWorld('lm', {
     confirm: (o) => ipcRenderer.invoke('agent:confirm', o),
     // 通过 llama.cpp /tools 端点执行已批准的工具
     execute: (o) => ipcRenderer.invoke('agent:execute', o),
-    // 工具名唯一来源在 shared/agent.js（主进程与渲染层共用，避免两边列表漂移）
-    expandTools: (v) => expandToolsArg(v),
-    autoApprove: (v) => Array.from(autoApproveSet(v)),
-    requiresConfirm: (name) => toolRequiresConfirm(name),
+    // 工具自动放行集合：由主进程用 shared/agent.js 计算（唯一来源，避免两边列表漂移）
+    autoApprove: (v) => ipcRenderer.invoke('agent:auto-approve', v),
   },
   mmIpc: {
     pick: () => ipcRenderer.invoke('mm:pick-images'),
