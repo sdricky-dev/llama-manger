@@ -32,6 +32,7 @@ function load(appUserData) {
     mode: 'server',
     modelPath: '',
     params: null,
+    apiStyle: 'openai', // 'openai' | 'anthropic' | 'openai-responses'
   };
   try {
     const raw = fs.readFileSync(settingsPath(appUserData), 'utf8');

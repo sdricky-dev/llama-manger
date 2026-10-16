@@ -1,5 +1,14 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
+const { ANTHROPIC_API_STYLES } = require('./shared/anthropic');
+const { expandToolsArg, autoApproveSet, toolRequiresConfirm } = require('./shared/agent');
+const {
+  SUPPORTED_IMAGE_MIMES,
+  detectMimeByExt,
+  toMultimodalContent,
+  toMultimodalMessage,
+  dataUriSize,
+} = require('./shared/multimodal');
 
 function on(channel, cb) {
   const listener = (_e, data) => cb(data);
@@ -7,7 +16,17 @@ function on(channel, cb) {
   return () => ipcRenderer.removeListener(channel, listener);
 }
 
+// 这些常量直接从主进程注册到 window（不需要走 IPC）
 contextBridge.exposeInMainWorld('lm', {
+  apiStyles: ANTHROPIC_API_STYLES,
+  // 多模态辅助（直接挂在主进程上下文中，不需要走 IPC）
+  mm: {
+    SUPPORTED_IMAGE_MIMES: Array.from(SUPPORTED_IMAGE_MIMES),
+    detectMimeByExt,
+    toMultimodalContent,
+    toMultimodalMessage,
+    dataUriSize,
+  },
   hw: {
     scan: () => ipcRenderer.invoke('hw:scan'),
   },
@@ -39,6 +58,46 @@ contextBridge.exposeInMainWorld('lm', {
     findFreePort: (start) => ipcRenderer.invoke('engine:find-free-port', start),
     fit: (o) => ipcRenderer.invoke('engine:fit', o),
     on: on,
+  },
+  bench: {
+    // 仿 LocalScore：在本机上用 llama-bench 跑一次实测
+    run: (o) => ipcRenderer.invoke('bench:run', o),
+  },
+  agent: {
+    // 弹原生确认框，问用户是否允许当前工具调用
+    confirm: (o) => ipcRenderer.invoke('agent:confirm', o),
+    // 通过 llama.cpp /tools 端点执行已批准的工具
+    execute: (o) => ipcRenderer.invoke('agent:execute', o),
+    // 工具名唯一来源在 shared/agent.js（主进程与渲染层共用，避免两边列表漂移）
+    expandTools: (v) => expandToolsArg(v),
+    autoApprove: (v) => Array.from(autoApproveSet(v)),
+    requiresConfirm: (name) => toolRequiresConfirm(name),
+  },
+  mmIpc: {
+    pick: () => ipcRenderer.invoke('mm:pick-images'),
+    encode: (paths) => ipcRenderer.invoke('mm:encode-files', paths),
+  },
+  sessions: {
+    list: () => ipcRenderer.invoke('sessions:list'),
+    save: (o) => ipcRenderer.invoke('sessions:save', o),
+    load: (name) => ipcRenderer.invoke('sessions:load', name),
+    remove: (name) => ipcRenderer.invoke('sessions:remove', name),
+    export: (o) => ipcRenderer.invoke('sessions:export', o),
+    pickFile: () => ipcRenderer.invoke('sessions:pick-file'),
+  },
+  sandbox: {
+    capability: () => ipcRenderer.invoke('sandbox:capability'),
+    probe: () => ipcRenderer.invoke('sandbox:probe'),
+    shouldEnable: (o) => ipcRenderer.invoke('sandbox:should-enable', o),
+  },
+  hf: {
+    list: (spec) => ipcRenderer.invoke('hf:list', spec),
+    download: (o) => ipcRenderer.invoke('hf:download', o),
+    onProgress: (cb) => {
+      const listener = (_e, data) => cb(data);
+      ipcRenderer.on('hf:progress', listener);
+      return () => ipcRenderer.removeListener('hf:progress', listener);
+    },
   },
   config: {
     load: () => ipcRenderer.invoke('config:load'),

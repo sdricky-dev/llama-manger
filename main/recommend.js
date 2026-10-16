@@ -630,10 +630,9 @@ function recommend({ hw, model, params: curParams }) {
     minP: 0.05,
     repeatPenalty: 1.1,
     seed: -1,
-    // 高级
+    // 高级（mlock/mmap/dio 已合并为 loadMode，上游只认 -lm/--load-mode）
     ropeScaling,
     yarnOrigCtx,
-    mlock: false,
     loadMode: 'auto',
     splitMode: 'layer',
     tensorSplit: '',

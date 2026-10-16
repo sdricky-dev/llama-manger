@@ -1,6 +1,9 @@
 # 依赖
 node_modules/
 
+# 本地编译工具链（scripts/build-engine.sh 用：venv 里装 cmake/ninja）
+.buildtools/
+
 # electron-builder 产物
 dist/
 out/

@@ -34,6 +34,14 @@
       <div id="modelList" class="model-list">
         <div class="empty">尚未扫描。选择包含 .gguf 文件的目录后开始。</div>
       </div>
+      <div class="hf-row">
+        <input type="text" id="hfSpec" placeholder="Hugging Face repo，如 Qwen/Qwen3-1.7B-GGUF:Q4_K_M" spellcheck="false" />
+        <button id="btnHfFetch" class="btn">📥 HF 下载</button>
+      </div>
+      <div id="hfPanel" class="hf-panel hidden">
+        <div id="hfList" class="hf-list"></div>
+        <div class="hf-progress" id="hfProgress"></div>
+      </div>
       <div class="list-hint">右键模型卡片（或卡片上的 <b>⋯</b> 按钮）可直接在文件管理器中打开/定位对应文件，方便核对文件是否齐全。</div>
       <div id="modelInfo" class="model-info hidden"></div>
       <div id="modelWarnings" class="warnings hidden"></div>
@@ -54,9 +62,27 @@
         <span class="oneclick-hint">基于本机硬件 + 模型架构自动计算推荐值（每个参数可单独修改，修改后实时重算内存）</span>
         <label class="adv-label"><input type="check" id="advToggle" /> 高级选项</label>
         <button id="btnFitCheck" class="btn ghost" title="调用 llama-fit-params 引擎自检（信息性输出）">引擎自检</button>
+        <button id="btnBench" class="btn ghost" title="用 llama-bench 跑本机实测：prompt TPS / 生成 TPS / TTFT / LocalScore">⚡ 跑基准</button>
       </div>
 
       <div id="hints" class="hints"></div>
+
+      <div id="benchPanel" class="bench-panel hidden">
+        <div class="bench-head">
+          <span class="bench-title">📊 本机基准（仿 LocalScore）</span>
+          <span id="benchStatus" class="bench-status">—</span>
+        </div>
+        <div id="benchBody" class="bench-body hidden">
+          <div class="bench-grid">
+            <div class="bench-item"><b id="benchPromptTps">—</b><span>Prompt TPS</span></div>
+            <div class="bench-item"><b id="benchGenTps">—</b><span>生成 TPS</span></div>
+            <div class="bench-item"><b id="benchTtftMs">—</b><span>首 token (ms)</span></div>
+            <div class="bench-item"><b id="benchLocalScore">—</b><span>LocalScore</span></div>
+          </div>
+          <div id="benchMeta" class="bench-meta">—</div>
+          <div class="bench-note">LocalScore = 10·∛(promptTPS · genTPS · 1000/TTFT)。≥1000 优秀，≥250 可用，≥100 一般。基准结果与启动参数一致；改了 ngl/ctx/threads 后重新跑才能反映新配置的性能。</div>
+        </div>
+      </div>
 
       <div class="config-grid">
         <div id="paramGroups" class="param-groups"></div>
@@ -141,16 +167,34 @@
       <div class="chat" id="chatPanel">
         <div class="chat-head">
           <h3>对话</h3>
-          <span class="chat-hint">通过 OpenAI 兼容 API（/v1/chat/completions）流式对话；需先启动 API 服务</span>
+          <span class="chat-hint">通过 llama-server 的兼容 API 流式对话；需先启动 API 服务</span>
+          <label class="chat-api-style" title="切换客户端调用的 API 端点协议。OpenAI Chat 通用；Anthropic Messages 让 Claude Code / Continue 等客户端可接入">
+            <span>API 风格</span>
+            <select id="apiStyle"></select>
+          </label>
         </div>
         <div id="chatMsgs" class="chat-msgs"></div>
         <div class="chat-input">
+          <div id="chatThumbs" class="chat-thumbs hidden"></div>
           <textarea id="chatText" rows="2" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
           <div class="chat-btns">
+            <button id="btnChatImage" class="btn ghost" title="附加图片（需要模型支持视觉：自动配对 mmproj）">📎 图片</button>
             <button id="btnChatSend" class="btn primary">发送</button>
             <button id="btnChatStop" class="btn ghost" disabled>停止</button>
             <button id="btnChatClear" class="btn ghost">清空</button>
+            <button id="btnChatSave" class="btn ghost" title="把当前对话存档为 JSONL（轻量、可分享；不同于 KV 存盘）">💾 存档</button>
+            <span id="agentBadge" class="agent-badge hidden" title="Agent 模式：模型可调用本地工具"></span>
           </div>
+        </div>
+
+        <!-- 会话存档（轻量 JSONL） -->
+        <div class="sessions" id="sessionsPanel">
+          <div class="chat-head">
+            <h3>📁 会话存档</h3>
+            <span class="chat-hint">把对话历史（含 tool 调用）保存到 ~/.llamamanager/sessions/，轻量、可分享。不同于 KV 存盘。</span>
+            <button id="btnSessionsRefresh" class="btn ghost small">刷新</button>
+          </div>
+          <div id="sessionsList" class="sessions-list"></div>
         </div>
       </div>
     </section>

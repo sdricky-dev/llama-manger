@@ -167,7 +167,10 @@ function modelMenu(m, subject) {
 let updateTimer = null;
 function scheduleUpdate() {
   if (updateTimer) clearTimeout(updateTimer);
-  updateTimer = setTimeout(updateDynamic, 150);
+  updateTimer = setTimeout(() => {
+    updateDynamic();
+    updateAgentBadge('idle');
+  }, 150);
 }
 
 /* ---------------- 硬件 ---------------- */
@@ -889,6 +892,343 @@ function addMsg(role, text) {
   return el;
 }
 
+/** 当前选中的 API 风格（OpenAI Chat / Anthropic Messages / OpenAI Responses） */
+function apiStyle() {
+  const el = $('apiStyle');
+  return el ? el.value : 'openai';
+}
+/** 把 (messages, ...) 翻译成所选风格请求体 */
+function buildChatRequestBody(style) {
+  if (style === 'anthropic') {
+    const { toAnthropicRequest } = window.__lmApi || {};
+    if (toAnthropicRequest) return toAnthropicRequest(buildOpenAiBase());
+    // 兜底本地复刻（无依赖退化）
+    return fallbackAnthropicBody(buildOpenAiBase());
+  }
+  return buildOpenAiBase();
+}
+
+function buildOpenAiBase() {
+  // 处理最后一条 user 消息：若有待发送图片，把它升级为 multimodal content
+  const messages = state.chatHistory.slice();
+  if (chatImages.length && messages.length && messages[messages.length - 1].role === 'user') {
+    const last = messages[messages.length - 1];
+    const paths = chatImages.map((img) => img.path);
+    messages[messages.length - 1] = window.lm.mm.toMultimodalMessage(last.content, paths);
+  }
+  return {
+    model: state.model?.path,
+    messages,
+    stream: true,
+    // 固定 slot：上下文留在这 slot 里，可存盘/恢复
+    id_slot: slotId(),
+    temperature: state.params.temp,
+    top_k: state.params.topK,
+    top_p: state.params.topP,
+    min_p: state.params.minP,
+    repeat_penalty: state.params.repeatPenalty,
+  };
+}
+
+/** 当前 Agent 模式是否启用（取决于启动参数 --tools） */
+function agentEnabled() {
+  return state.params?.tools && state.params.tools !== 'none';
+}
+/** 工具自动放行集合（取决于 --tools 值；展开逻辑与主进程共用 shared/agent.js） */
+function agentAutoApprove() {
+  return api.agent.autoApprove(state.params?.tools || 'none');
+}
+/** 更新 Agent 模式徽章 */
+function updateAgentBadge(state_) {
+  const el = $('agentBadge');
+  if (!el) return;
+  if (!agentEnabled()) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden');
+  el.classList.toggle('active', agentEnabled() && state_ !== 'busy');
+  el.classList.toggle('busy', state_ === 'busy');
+  const n = agentAutoApprove().length;
+  el.textContent = state_ === 'busy' ? 'Agent 模式（执行中）' : `Agent 模式（${n} 项工具）`;
+}
+
+/** 把工具调用步骤打印到聊天区，方便用户看见 agent 在干什么 */
+function addAgentStep(text) {
+  const el = document.createElement('div');
+  el.className = 'agent-step';
+  el.textContent = text;
+  $('chatMsgs').appendChild(el);
+  $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight;
+  return el;
+}
+
+/** Agent 循环：从 chatHistory 出发，按 OpenAI Chat 协议跑多轮直到模型不再调工具 */
+async function runAgent({ base, render, onDone }) {
+  // base = { base, headers, style, body, signal }
+  let round = 0;
+  const MAX_ROUNDS = 8;
+  const style = base.style;
+  while (round < MAX_ROUNDS) {
+    round++;
+    let assistantMessage = null;
+    if (style === 'anthropic') {
+      const r = await callAnthropicOneShot(base);
+      if (r.error) throw new Error(r.error);
+      assistantMessage = r.assistant;
+      // 渲染内容
+      if (r.assistant.content) {
+        const last = $('chatMsgs').lastChild;
+        if (last && last.className.includes('assistant')) {
+          last.textContent = (last.textContent || '') + r.assistant.content;
+        }
+      }
+    } else {
+      // OpenAI Chat：流式，但本轮只关心 tool_calls —— 关闭 stream 以简化解析
+      const allToolCalls = [];
+      let content = '';
+      const resp = await fetch(`${base.base}${style === 'openai-responses' ? '/v1/responses' : '/v1/chat/completions'}`, {
+        method: 'POST',
+        headers: base.headers,
+        signal: base.signal,
+        body: JSON.stringify({ ...base.body, stream: false }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      const j = await resp.json();
+      const msg = j.choices && j.choices[0] && j.choices[0].message;
+      if (!msg) throw new Error('响应无 message');
+      assistantMessage = msg;
+      content = msg.content || '';
+      if (Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          if (tc && tc.type === 'function' && tc.function) allToolCalls.push({
+            id: tc.id, name: tc.function.name, args: tc.function.arguments,
+          });
+        }
+      }
+      if (content) {
+        const last = $('chatMsgs').lastChild;
+        if (last && last.className.includes('assistant')) {
+          last.textContent = (last.textContent || '') + content;
+          $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight;
+        }
+      }
+    }
+    if (!assistantMessage) return onDone({ finished: true });
+    // 解析工具调用
+    const tcArr = style === 'anthropic'
+      ? extractAnthropicToolCalls(assistantMessage)
+      : extractOpenAIToolCalls(assistantMessage);
+    if (!tcArr || tcArr.length === 0) {
+      // 没有工具调用，本轮就是最终答案
+      const content = assistantMessage.content || '';
+      if (content) state.chatHistory.push({ role: 'assistant', content });
+      return onDone({ finished: true });
+    }
+    // 处理工具
+    updateAgentBadge('busy');
+    addAgentStep(`🤖 模型请求 ${tcArr.length} 个工具调用：${tcArr.map((c) => c.name).join(', ')}`);
+    const results = [];
+    for (const call of tcArr) {
+      const confirm = await api.agent.confirm({
+        name: call.name,
+        args: call.args,
+        autoApproveList: agentAutoApprove(),
+      });
+      if (!confirm.approved) {
+        results.push({ id: call.id, name: call.name, isError: true, content: `用户拒绝执行 ${call.name}。请改用其他方式或不调用此工具。` });
+        continue;
+      }
+      addAgentStep(`▶ 调用 ${call.name}(${summarizeArgs(call.args)})${confirm.auto ? '（自动放行）' : ''}`);
+      const r = await api.agent.execute({ baseUrl: state.serverUrl, name: call.name, args: call.args });
+      if (r.ok) {
+        results.push({ id: call.id, name: call.name, content: r.content });
+        addAgentStep(`✓ ${call.name} 返回 ${r.content.length} 字符`);
+      } else {
+        results.push({ id: call.id, name: call.name, isError: true, content: `执行失败: ${r.error}` });
+        addAgentStep(`✗ ${call.name} 失败：${r.error}`);
+      }
+    }
+    // 把 assistant（含 tool_calls）+ tool 消息追加进 history
+    state.chatHistory.push(assistantMessage);
+    for (const r of results) {
+      state.chatHistory.push({
+        role: 'tool',
+        tool_call_id: r.id,
+        content: r.content,
+      });
+    }
+    // 把"完整 history"作为下一轮的 messages
+    base.body = { ...base.body, messages: state.chatHistory.slice(), stream: false };
+  }
+  addAgentStep('⚠️ 已达 Agent 最大循环次数（8 轮），停止。');
+  return onDone({ finished: true, exhausted: true });
+}
+
+function extractOpenAIToolCalls(msg) {
+  if (!msg || !Array.isArray(msg.tool_calls)) return [];
+  return msg.tool_calls
+    .filter((tc) => tc && tc.type === 'function' && tc.function && tc.function.name)
+    .map((tc) => {
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = { _raw: tc.function.arguments }; }
+      return { id: tc.id, name: tc.function.name, args };
+    });
+}
+
+function extractAnthropicToolCalls(msg) {
+  // Anthropic 兼容：tool_use 内容块暂不在 llama-server 实现，跳过
+  return [];
+}
+
+async function callAnthropicOneShot(base) {
+  // 一次非流式请求：拿完整响应
+  const resp = await fetch(`${base.base}/v1/messages`, {
+    method: 'POST',
+    headers: base.headers,
+    signal: base.signal,
+    body: JSON.stringify({ ...base.body, stream: false }),
+  });
+  if (!resp.ok) return { error: `HTTP ${resp.status}: ${await resp.text()}` };
+  const j = await resp.json();
+  // 拼接 content blocks
+  let text = '';
+  if (Array.isArray(j.content)) {
+    for (const b of j.content) if (b && b.type === 'text' && typeof b.text === 'string') text += b.text;
+  }
+  return { assistant: { role: 'assistant', content: text } };
+}
+
+function summarizeArgs(args) {
+  if (!args || typeof args !== 'object') return '';
+  const parts = [];
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v === 'string' && v.length > 60) parts.push(`${k}="${v.slice(0, 60)}…"`);
+    else parts.push(`${k}=${JSON.stringify(v)}`);
+  }
+  return parts.join(', ');
+}
+
+/* ---------------- 多模态图片 ---------------- */
+let chatImages = []; // [{ path, mime, dataUri, sizeBytes }]
+
+function renderThumbs() {
+  const box = $('chatThumbs');
+  if (!box) return;
+  if (!chatImages.length) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+  box.classList.remove('hidden');
+  box.innerHTML = chatImages.map((img, i) => `
+    <div class="chat-thumb" data-i="${i}" style="background-image:url('${img.dataUri}')" title="${esc(img.path)} (${(img.sizeBytes/1024).toFixed(0)} KB)">
+      <button class="x" data-rm="${i}" title="移除">×</button>
+    </div>
+  `).join('');
+  box.querySelectorAll('.x').forEach((b) => {
+    b.onclick = () => {
+      chatImages.splice(Number(b.dataset.rm), 1);
+      renderThumbs();
+    };
+  });
+}
+
+async function pickImages() {
+  const paths = await api.mmIpc.pick();
+  if (!paths.length) return;
+  const results = await api.mmIpc.encode(paths);
+  const ok = results.filter((r) => r && r.ok);
+  const bad = results.filter((r) => r && !r.ok);
+  for (const r of ok) {
+    if (chatImages.length >= 4) {
+      toast('最多附加 4 张图片', 'bad');
+      break;
+    }
+    chatImages.push({ path: paths[results.indexOf(r)], mime: r.mime, dataUri: r.dataUri, sizeBytes: r.sizeBytes });
+  }
+  if (bad.length) toast(`${bad.length} 张图片加载失败：${bad[0].error}`, 'bad');
+  renderThumbs();
+  // 提示 mmproj 自动配对
+  if (ok.length && state.model && !state.params.mmproj) {
+    const hasMmproj = state.model.companions?.mmproj?.length;
+    if (hasMmproj) {
+      // 一键应用
+      state.params.mmproj = state.model.companions.mmproj[0].path;
+      renderParams();
+      scheduleUpdate();
+      saveConfig();
+      toast(`已自动配对 mmproj: ${baseName(state.params.mmproj)}`, 'ok');
+    } else {
+      toast('当前模型没附带 mmproj，发图也不会被处理', 'bad');
+    }
+  }
+}
+
+/** 兜底实现：与 shared/anthropic.js 行为一致（避免预加载失败时崩溃） */
+function fallbackAnthropicBody(b) {
+  const out = { model: b.model };
+  const sys = [];
+  const msgs = [];
+  for (const m of b.messages || []) {
+    if (m.role === 'system') sys.push(m.content);
+    else if (m.role === 'user' || m.role === 'assistant') msgs.push({ role: m.role, content: m.content });
+  }
+  if (sys.length) out.system = sys.join('\n\n');
+  out.messages = msgs;
+  out.max_tokens = 4096;
+  if (Number.isFinite(b.temperature)) out.temperature = b.temperature;
+  if (Number.isFinite(b.top_p)) out.top_p = b.top_p;
+  if (b.stream) out.stream = true;
+  if (b.id_slot !== undefined) out.id_slot = b.id_slot;
+  return out;
+}
+
+/** 解析一行 SSE（按风格分发） */
+function parseChatStreamLine(style, line) {
+  if (style === 'anthropic') {
+    const { parseAnthropicStream } = window.__lmApi || {};
+    const fn = parseAnthropicStream || fallbackParseAnthropic;
+    const r = fn(line);
+    if (!r) return null;
+    return { content: r.content, reasoning: r.reasoning };
+  }
+  return fallbackParseOpenAi(line);
+}
+
+function fallbackParseAnthropic(line) {
+  const t = (line || '').trim();
+  if (!t.startsWith('data:')) return null;
+  const body = t.slice(5).trim();
+  if (!body || body === '[DONE]') return null;
+  let j;
+  try { j = JSON.parse(body); } catch { return null; }
+  const type = j && j.type;
+  if (type === 'content_block_delta' && j.delta) {
+    if (j.delta.type === 'text_delta') return { content: j.delta.text };
+    if (j.delta.type === 'thinking_delta') return { reasoning: j.delta.thinking };
+  }
+  return null;
+}
+
+function fallbackParseOpenAi(line) {
+  const t = (line || '').trim();
+  if (!t.startsWith('data:')) return null;
+  const data = t.slice(5).trim();
+  if (!data || data === '[DONE]') return null;
+  try {
+    const j = JSON.parse(data);
+    const d = j.choices && j.choices[0] && j.choices[0].delta;
+    if (!d) return null;
+    return {
+      content: typeof d.content === 'string' ? d.content : undefined,
+      reasoning: typeof d.reasoning_content === 'string' ? d.reasoning_content : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function chatSend() {
   if (!state.serverUrl) {
     addMsg('error', '请先启动 API 服务（③ 启动引擎 → 启动）');
@@ -903,26 +1243,32 @@ async function chatSend() {
   $('btnChatSend').disabled = true;
   $('btnChatStop').disabled = false;
   chatAbort = new AbortController();
+  const style = apiStyle();
+  const base = state.serverUrl.replace(/\/+$/, '');
+  const headers = { 'Content-Type': 'application/json' };
+  if (state.params.apiKey) headers['Authorization'] = `Bearer ${state.params.apiKey}`;
+  const baseBody = buildChatRequestBody(style);
   try {
-    const base = state.serverUrl.replace(/\/+$/, '');
-    const headers = { 'Content-Type': 'application/json' };
-    if (state.params.apiKey) headers['Authorization'] = `Bearer ${state.params.apiKey}`;
-    const resp = await fetch(`${base}/v1/chat/completions`, {
+    if (agentEnabled() && style !== 'anthropic') {
+      // Agent 模式：每轮独立非流式请求，遇到 tool_calls 就执行工具再继续
+      updateAgentBadge('busy');
+      await runAgent({
+        base: { base, headers, style, body: baseBody, signal: chatAbort.signal },
+        render: () => {},
+        onDone: () => {},
+      });
+      updateAgentBadge('idle');
+      return;
+    }
+    // 普通模式：流式
+    const path = style === 'anthropic' ? '/v1/messages'
+                : style === 'openai-responses' ? '/v1/responses'
+                : '/v1/chat/completions';
+    const resp = await fetch(`${base}${path}`, {
       method: 'POST',
       headers,
       signal: chatAbort.signal,
-      body: JSON.stringify({
-        model: state.model?.path,
-        messages: state.chatHistory,
-        stream: true,
-        // 固定 slot：这样这段对话的上下文会保留在该 slot 里，可存盘/恢复、下次直接复用
-        id_slot: slotId(),
-        temperature: state.params.temp,
-        top_k: state.params.topK,
-        top_p: state.params.topP,
-        min_p: state.params.minP,
-        repeat_penalty: state.params.repeatPenalty,
-      }),
+      body: JSON.stringify(baseBody),
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
     const reader = resp.body.getReader();
@@ -942,17 +1288,10 @@ async function chatSend() {
       const lines = buf.split('\n');
       buf = lines.pop();
       for (const line of lines) {
-        const t = line.trim();
-        if (!t.startsWith('data:')) continue;
-        const data = t.slice(5).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const j = JSON.parse(data);
-          const d = j.choices?.[0]?.delta || {};
-          if (d.reasoning_content) think += d.reasoning_content;
-          if (d.content) out += d.content;
-          if (d.reasoning_content || d.content) render();
-        } catch {}
+        const r = parseChatStreamLine(style, line);
+        if (!r) continue;
+        if (r.reasoning) { think += r.reasoning; render(); }
+        if (r.content) { out += r.content; render(); }
       }
     }
     if (!out && !think) el.textContent = '（空响应）';
@@ -969,6 +1308,10 @@ async function chatSend() {
     chatAbort = null;
     $('btnChatSend').disabled = false;
     $('btnChatStop').disabled = true;
+    updateAgentBadge('idle');
+    // 发送后清掉已用图片
+    chatImages = [];
+    renderThumbs();
   }
 }
 
@@ -1092,6 +1435,294 @@ async function slotAction(action, filenameOverride) {
   refreshSlots();
 }
 
+/* ---------------- 会话存档（轻量 JSONL） ---------------- */
+async function saveCurrentSession() {
+  if (!state.chatHistory.length) return toast('当前没有对话', 'bad');
+  try {
+    const r = await api.sessions.save({
+      header: {
+        type: 'header',
+        version: 1,
+        id: `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        timestamp: new Date().toISOString(),
+        model: state.model?.path || null,
+        apiStyle: apiStyle(),
+        params: { ...state.params },
+      },
+      messages: state.chatHistory.map((m) => ({
+        role: m.role,
+        content: m.content,
+        ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
+        ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+      })),
+    });
+    toast(`已存档 ${r.name}`, 'ok');
+    refreshSessions();
+  } catch (err) {
+    toast(`存档失败：${err.message}`, 'bad');
+  }
+}
+
+async function refreshSessions() {
+  const box = $('sessionsList');
+  if (!box) return;
+  try {
+    const r = await api.sessions.list();
+    if (!r.exists) {
+      box.innerHTML = '<div class="empty">未存档过任何对话</div>';
+      return;
+    }
+    if (!r.files.length) {
+      box.innerHTML = '<div class="empty">未存档过任何对话</div>';
+      return;
+    }
+    box.innerHTML = r.files.map((f) => {
+      const s = f.summary || {};
+      const title = s.titleGuess ? `"${esc(s.titleGuess)}…"` : '（无标题）';
+      const model = s.model ? baseName(s.model) : '';
+      const time = s.timestamp ? new Date(s.timestamp).toLocaleString() : '';
+      return `
+        <div class="session-item" data-name="${esc(f.name)}">
+          <div class="meta">
+            <div class="title">${title}</div>
+            <div class="sub">${model} · ${s.messageCount || 0} 条 · ${time}</div>
+          </div>
+          <button class="btn ghost small" data-act="load">恢复</button>
+          <button class="btn ghost small" data-act="export">导出</button>
+          <button class="btn ghost small" data-act="del">删除</button>
+        </div>`;
+    }).join('');
+    box.querySelectorAll('.session-item').forEach((el) => {
+      const name = el.dataset.name;
+      const file = r.files.find((f) => f.name === name);
+      el.querySelector('[data-act="load"]').onclick = () => restoreSession(name);
+      el.querySelector('[data-act="export"]').onclick = () => exportSession(file);
+      el.querySelector('[data-act="del"]').onclick = () => removeSession(name);
+    });
+  } catch (err) {
+    box.innerHTML = `<div class="empty">读取失败：${esc(err.message)}</div>`;
+  }
+}
+
+async function restoreSession(name) {
+  try {
+    const parsed = await api.sessions.load(name);
+    if (!parsed.messages || !parsed.messages.length) return toast('存档为空', 'bad');
+    state.chatHistory = parsed.messages.map((m) => {
+      const out = { role: m.role, content: m.content };
+      if (m.tool_calls) out.tool_calls = m.tool_calls;
+      if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+      return out;
+    });
+    // 重建聊天区
+    $('chatMsgs').innerHTML = '';
+    for (const m of state.chatHistory) {
+      const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+      addMsg(m.role, text);
+    }
+    toast(`已恢复 ${state.chatHistory.length} 条消息`, 'ok');
+  } catch (err) {
+    toast(`恢复失败：${err.message}`, 'bad');
+  }
+}
+
+async function removeSession(name) {
+  if (!confirm(`删除会话存档？\n\n${name}`)) return;
+  try {
+    await api.sessions.remove(name);
+    toast(`已删除 ${name}`, 'ok');
+    refreshSessions();
+  } catch (err) {
+    toast(`删除失败：${err.message}`, 'bad');
+  }
+}
+
+async function exportSession(file) {
+  const target = await api.sessions.pickFile();
+  if (!target) return;
+  try {
+    const parsed = await api.sessions.load(file.name);
+    const md = await api.sessions.export({ name: file.name, parsed });
+    // 直接 fetch 主进程写文件？
+    // 简单起见：返回 md 让渲染层下载
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = file.name.replace(/\.jsonl$/, '.md');
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast(`已导出 ${a.download}`, 'ok');
+  } catch (err) {
+    toast(`导出失败：${err.message}`, 'bad');
+  }
+}
+
+/* ---------------- 本机基准（仿 LocalScore） ---------------- */
+function benchStatus(text, kind) {
+  const el = $('benchStatus');
+  if (!el) return;
+  el.className = `bench-status${kind ? ' ' + kind : ''}`;
+  el.textContent = text;
+}
+function fmtTps(v) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
+  return v.toFixed(1);
+}
+function fmtTtft(v) {
+  if (v === null || v === undefined || !Number.isFinite(v) || v <= 0) return '—';
+  return v.toFixed(0);
+}
+
+async function runBench() {
+  if (!state.model) return alert('请先选择模型');
+  const bin = await getBinaries();
+  if (!bin?.server) {
+    // 我们要的不是 llama-server，但要求 build 目录里至少有可解析的 layout
+    // 用同一个目录去探测 llama-bench
+  }
+  // 直接从 server 路径推断 bench 路径（同目录）
+  const benchBin = await api.engine.binaries(state.config?.buildDir || '');
+  if (!benchBin?.server) {
+    alert('未找到 llama-bench 二进制。\n请确认 build 目录里至少有 bin/llama-server（同一个目录也会有 bin/llama-bench）。');
+    return;
+  }
+  // 把 server 路径里的 "llama-server" 替换成 "llama-bench"
+  const sep = benchBin.dir.includes('\\') ? '\\' : '/';
+  const ext = benchBin.dir.includes('\\') ? '.exe' : '';
+  const benchPath = `${benchBin.dir}${sep}llama-bench${ext}`;
+  $('benchPanel').classList.remove('hidden');
+  benchStatus('跑基准中…', 'running');
+  $('benchBody').classList.add('hidden');
+  try {
+    const r = await api.bench.run({
+      bin: benchPath,
+      modelPath: state.model.path,
+      params: state.params,
+    });
+    if (!r.ok) {
+      benchStatus(`失败: ${r.error || '未知错误'}`, 'bad');
+      toast(`跑基准失败：${r.error || '未知错误'}`, 'bad');
+      return;
+    }
+    const s = r.summary;
+    $('benchPromptTps').textContent = fmtTps(s.promptTps);
+    $('benchGenTps').textContent = fmtTps(s.genTps);
+    $('benchTtftMs').textContent = fmtTtft(s.ttftMs);
+    $('benchLocalScore').textContent = s.localScore ? s.localScore.toFixed(0) : '—';
+    const meta = [
+      s.modelType ? `模型 ${s.modelType}` : null,
+      s.modelSize ? `${(s.modelSize / 1e9).toFixed(2)} GB` : null,
+      s.ngl !== null && s.ngl !== undefined ? `ngl=${s.ngl}` : null,
+      s.typeK ? `KV=${s.typeK}/${s.typeV || ''}` : null,
+      s.nThreads ? `threads=${s.nThreads}` : null,
+      s.nPrompt ? `prompt=${s.nPrompt}` : null,
+      s.nGen ? `gen=${s.nGen}` : null,
+    ].filter(Boolean).join(' · ');
+    $('benchMeta').textContent = meta || '—';
+    $('benchBody').classList.remove('hidden');
+    benchStatus(`✓ ${s.localScore.toFixed(0)} 分`, 'ok');
+    toast(`LocalScore ${s.localScore.toFixed(0)} · prompt ${fmtTps(s.promptTps)} TPS · gen ${fmtTps(s.genTps)} TPS`, 'ok');
+    state.benchSummary = s;
+  } catch (err) {
+    benchStatus(`失败: ${err.message}`, 'bad');
+    toast(`跑基准失败：${err.message}`, 'bad');
+  }
+}
+
+/* ---------------- HF 模型下载 ---------------- */
+let hfLastListing = null;
+let hfProgressUnsub = null;
+
+async function hfFetch() {
+  const spec = $('hfSpec').value.trim();
+  if (!spec) return toast('请填写 HF repo', 'bad');
+  $('hfPanel').classList.remove('hidden');
+  $('hfList').innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const r = await api.hf.list(spec);
+    if (!r.ok) {
+      $('hfList').innerHTML = `<div class="empty">失败：${esc(r.error)}</div>`;
+      return;
+    }
+    hfLastListing = r;
+    const files = r.files || [];
+    if (!files.length) {
+      $('hfList').innerHTML = '<div class="empty">该 repo 没 .gguf 文件</div>';
+      return;
+    }
+    // 默认勾选 primary + mmproj + draft（如有）
+    const checked = new Set();
+    if (r.picked.primary) checked.add(r.picked.primary.path);
+    if (r.picked.mmproj) checked.add(r.picked.mmproj.path);
+    if (r.picked.draft) checked.add(r.picked.draft.path);
+
+    $('hfList').innerHTML = files.map((f) => {
+      const tag = f === r.picked.primary ? '🟢 主模型'
+                : f === r.picked.mmproj ? '👁 mmproj'
+                : f === r.picked.draft ? '⚡ 草稿'
+                : '';
+      return `
+        <label class="hf-file">
+          <input type="checkbox" data-name="${esc(f.path)}" ${checked.has(f.path) ? 'checked' : ''}>
+          <span class="name">${esc(f.path)} ${tag ? `<span style="color:var(--accent2)">· ${tag}</span>` : ''}</span>
+          <span class="size">${(f.size/1e9).toFixed(2)} GB</span>
+        </label>`;
+    }).join('') + `
+      <div class="hf-row" style="margin-top:8px">
+        <button id="btnHfDownload" class="btn primary">下载所选到 ${esc(state.config?.modelDir || '~/models')}</button>
+      </div>
+    `;
+    $('btnHfDownload').onclick = hfDownload;
+  } catch (err) {
+    $('hfList').innerHTML = `<div class="empty">失败：${esc(err.message)}</div>`;
+  }
+}
+
+async function hfDownload() {
+  if (!hfLastListing) return;
+  const destDir = config.expandHome(state.config?.modelDir || '~/models');
+  const checked = Array.from($('hfList').querySelectorAll('input[type=checkbox]:checked'))
+    .map((cb) => cb.dataset.name);
+  if (!checked.length) return toast('请至少选一个文件', 'bad');
+  if (!confirm(`下载 ${checked.length} 个文件到 ${destDir}？`)) return;
+  $('hfProgress').innerHTML = '<div>开始下载…</div>';
+  if (!hfProgressUnsub) hfProgressUnsub = api.hf.onProgress(renderHfProgress);
+  try {
+    const r = await api.hf.download({ spec: $('hfSpec').value.trim(), filenames: checked, destDir });
+    const lines = (r.results || []).map((x) => x.ok
+      ? `<div>✓ ${esc(x.filename)} (${(x.sizeBytes/1e9).toFixed(2)} GB)</div>`
+      : `<div style="color:var(--err)">✗ ${esc(x.filename)}: ${esc(x.error)}</div>`);
+    $('hfProgress').insertAdjacentHTML('beforeend', lines.join(''));
+    if (r.results.every((x) => x.ok)) {
+      toast(`下载完成（${checked.length} 个文件）`, 'ok');
+      // 重新扫描
+      await scanModels();
+    } else {
+      toast('部分文件下载失败', 'bad');
+    }
+  } catch (err) {
+    $('hfProgress').insertAdjacentHTML('beforeend', `<div style="color:var(--err)">失败：${esc(err.message)}</div>`);
+  }
+}
+
+function renderHfProgress(p) {
+  const box = $('hfProgress');
+  if (!box) return;
+  const pct = p.total > 0 ? Math.floor(p.received / p.total * 100) : 0;
+  const line = `
+    <div>
+      <span class="bar"><span class="fill" style="width:${pct}%"></span></span>
+      ${esc(p.filename)} · ${(p.received/1e6).toFixed(1)} MB${p.total ? ' / ' + (p.total/1e6).toFixed(1) + ' MB' : ''} (${pct}%)${p.error ? ' · 失败' : ''}
+    </div>
+  `;
+  // 简化：每次进度覆盖上一行（同名文件覆盖；不同文件追加）
+  const existing = box.querySelector(`[data-file="${cssesc(p.filename)}"]`);
+  if (existing) existing.outerHTML = `<div data-file="${cssesc(p.filename)}">${line}</div>`;
+  else box.insertAdjacentHTML('beforeend', `<div data-file="${cssesc(p.filename)}">${line}</div>`);
+}
+
+function cssesc(s) { return String(s || '').replace(/"/g, '&quot;'); }
+
 /* ---------------- 设置持久化 ---------------- */
 let saveTimer = null;
 function saveConfig() {
@@ -1105,6 +1736,7 @@ function saveConfig() {
       mode: state.mode,
       modelPath: state.model?.path || '',
       params: state.params,
+      apiStyle: apiStyle(),
     };
     api.config.save(state.config);
   }, 400);
@@ -1118,6 +1750,14 @@ async function loadConfig() {
   if (state.config.params) Object.assign(state.params, state.config.params);
   if (state.config.modelPath) {
     $('modelDir').value = state.config.modelDir;
+  }
+  // 填充 API 风格下拉框
+  const sel = $('apiStyle');
+  if (sel && window.lm.apiStyles) {
+    sel.innerHTML = window.lm.apiStyles
+      .map((s) => `<option value="${s.value}">${s.label}</option>`)
+      .join('');
+    sel.value = state.config.apiStyle || 'openai';
   }
 }
 
@@ -1178,6 +1818,7 @@ async function init() {
     }
   };
   $('btnRescan').onclick = scanModels;
+  $('btnHfFetch').onclick = hfFetch;
   $('modelDir').addEventListener('change', () => { saveConfig(); scanModels(); });
   $('btnOneClick').onclick = async () => {
     if (!state.model) return alert('请先选择模型');
@@ -1192,6 +1833,7 @@ async function init() {
     saveConfig();
   };
   $('btnFitCheck').onclick = fitCheck;
+  $('btnBench').onclick = runBench;
   $('btnStart').onclick = start;
   $('btnStop').onclick = stop;
   $('btnCopyCmd').onclick = async () => {
@@ -1206,7 +1848,16 @@ async function init() {
   if (adv) adv.onchange = () => { state.advanced = adv.checked; renderParams(); scheduleUpdate(); };
   $('btnChatSend').onclick = chatSend;
   $('btnChatStop').onclick = () => chatAbort?.abort();
-  $('btnChatClear').onclick = () => { $('chatMsgs').innerHTML = ''; state.chatHistory = []; };
+  $('btnChatClear').onclick = () => {
+    $('chatMsgs').innerHTML = '';
+    state.chatHistory = [];
+    chatImages = [];
+    renderThumbs();
+  };
+  $('btnChatImage').onclick = pickImages;
+  $('btnChatSave').onclick = saveCurrentSession;
+  $('btnSessionsRefresh').onclick = refreshSessions;
+  refreshSessions();
   // 会话存盘面板
   $('btnSlotSave').onclick = () => slotAction('save');
   $('btnSlotRestore').onclick = () => slotAction('restore');
@@ -1223,6 +1874,7 @@ async function init() {
     }
   });
   $('buildDir')?.addEventListener('change', saveConfig);
+  $('apiStyle')?.addEventListener('change', saveConfig);
   $('toast')?.addEventListener('click', hideToast);
 
   updateDynamic();

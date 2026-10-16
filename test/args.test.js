@@ -25,7 +25,6 @@ const BASE = {
   seed: -1,
   ropeScaling: 'none',
   yarnOrigCtx: 0,
-  mlock: false,
   loadMode: 'auto',
   splitMode: 'layer',
   tensorSplit: '',
@@ -83,10 +82,10 @@ test('MoE 参数与非默认 KV', () => {
 });
 
 test('YaRN 与高级参数', () => {
-  const a = buildArgs({ ...BASE, ropeScaling: 'yarn', yarnOrigCtx: 32768, mlock: true, mirostat: 2 }, '/tmp/m.gguf', 'cli');
+  const a = buildArgs({ ...BASE, ropeScaling: 'yarn', yarnOrigCtx: 32768, loadMode: 'mlock', mirostat: 2 }, '/tmp/m.gguf', 'cli');
   assert.ok(hasPair(a, '--rope-scaling', 'yarn'));
   assert.ok(hasPair(a, '--yarn-orig-ctx', 32768));
-  assert.ok(a.includes('--mlock'));
+  assert.ok(hasPair(a, '--load-mode', 'mlock'));
   assert.ok(hasPair(a, '--mirostat', 2));
   assert.ok(hasPair(a, '--mirostat-lr', 0.1));
 });
@@ -151,4 +150,72 @@ test('草稿长度：默认 3 不下发，改了才下发', () => {
   assert.ok(hasPair(buildArgs({ ...base, specDraftNMax: 8 }, '/tmp/m.gguf', 'server'), '--spec-draft-n-max', '8'));
   // cli 模式同样支持
   assert.ok(hasPair(buildArgs({ ...base, specDraftNMax: 8 }, '/tmp/m.gguf', 'cli'), '--spec-draft-n-max', '8'));
+});
+
+// ---------- 加载模式（上游 14a9d09f7 起 --mlock/--mmap/-dio 已被删除） ----------
+
+/** 已从 llama.cpp 删除的加载 flag：一个都不允许再下发，否则引擎 "invalid argument" 退出 */
+const REMOVED_LOAD_FLAGS = ['--mlock', '--mmap', '--no-mmap', '--direct-io', '--no-direct-io', '-dio', '-ndio'];
+
+test('加载模式：旧字段被翻译，且绝不出现已删除的 flag', () => {
+  const a = buildArgs({ mmap: true, mlock: true, directIo: true }, '/tmp/m.gguf', 'server');
+  for (const gone of REMOVED_LOAD_FLAGS) {
+    assert.ok(!a.includes(gone), `${gone} 已从引擎删除，不能下发`);
+  }
+  assert.ok(hasPair(a, '--load-mode', 'dio'), 'dio 优先级最高');
+});
+
+test('加载模式：mlock=true 单独出现 → --load-mode mlock', () => {
+  const a = buildArgs({ mlock: true }, '/tmp/m.gguf', 'cli');
+  assert.ok(!a.includes('--mlock'));
+  assert.ok(hasPair(a, '--load-mode', 'mlock'));
+});
+
+test('加载模式：loadMode 为默认 auto 时，旧字段仍然生效（不被静默丢弃）', () => {
+  const a = buildArgs({ ...BASE, mlock: true }, '/tmp/m.gguf', 'cli');
+  assert.ok(hasPair(a, '--load-mode', 'mlock'));
+});
+
+test('加载模式：用户明确选过 loadMode 时以它为准（旧字段不覆盖）', () => {
+  const a = buildArgs({ ...BASE, mlock: true, loadMode: 'dio' }, '/tmp/m.gguf', 'cli');
+  assert.ok(hasPair(a, '--load-mode', 'dio'));
+});
+
+test('加载模式：没有任何加载字段时不下发 --load-mode', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'cli').includes('--load-mode'));
+});
+
+test('加载模式：迁移结果真的被采用（旧字段被剥离后不再参与拼接）', () => {
+  // mmap=false 在新旧模型里都应变成 --load-mode none
+  assert.ok(hasPair(buildArgs({ ...BASE, mmap: false }, '/tmp/m.gguf', 'cli'), '--load-mode', 'none'));
+  // 迁移不应污染调用方传入的对象（除 _migrations 日志外）
+  const p = { ...BASE, mmap: false };
+  buildArgs(p, '/tmp/m.gguf', 'cli');
+  assert.equal(p.mmap, false, '原对象保持原样，避免二次调用时迁移状态错乱');
+});
+
+// ---------- Agent 工具（--tools） ----------
+
+test('tools：read_only 展开成引擎认识的具体工具名', () => {
+  const a = buildArgs({ ...BASE, tools: 'read_only' }, '/tmp/m.gguf', 'server');
+  assert.ok(!a.includes('read_only'), 'read_only 不是引擎取值，原样下发会让 server 启动失败');
+  assert.ok(hasPair(a, '--tools', 'read_file,file_glob_search,grep_search,get_info'));
+});
+
+test('tools：none / 未设置时不下发 --tools', () => {
+  assert.ok(!buildArgs({ ...BASE, tools: 'none' }, '/tmp/m.gguf', 'server').includes('--tools'));
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--tools'));
+});
+
+test('tools：all 原样下发', () => {
+  assert.ok(hasPair(buildArgs({ ...BASE, tools: 'all' }, '/tmp/m.gguf', 'server'), '--tools', 'all'));
+});
+
+test('tools：引擎不认识的名字（get_datetime / http_fetch）被过滤掉', () => {
+  const a = buildArgs({ ...BASE, tools: 'read_file,get_datetime,http_fetch' }, '/tmp/m.gguf', 'server');
+  assert.ok(hasPair(a, '--tools', 'read_file'));
+});
+
+test('tools：cli 模式不下发 --tools', () => {
+  assert.ok(!buildArgs({ ...BASE, tools: 'all' }, '/tmp/m.gguf', 'cli').includes('--tools'));
 });

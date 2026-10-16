@@ -10,6 +10,7 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const sandbox = require('./sandbox');
 
 let proc = null;
 let readySent = false;
@@ -29,12 +30,40 @@ function isRunning() {
 
 /**
  * 启动 llama-server。
- * @param {{bin:string, args:string[], cwd?:string}} o
+ * @param {{bin:string, args:string[], cwd?:string, modelPath?:string, slotSavePath?:string, allowLanOut?:boolean, sandbox?:boolean}} o
  */
-function startServer({ bin, args, cwd }) {
+function startServer(o) {
+  const { bin, args, cwd, modelPath, slotSavePath, allowLanOut } = o;
   if (isRunning()) throw new Error('服务已在运行');
   readySent = false;
-  proc = spawn(bin, args, {
+
+  // 沙箱包装（可选）：仅在用户开启且平台支持时生效
+  let cmd = bin;
+  let realArgs = args;
+  if (o.sandbox) {
+    const decision = sandbox.shouldEnableSandbox({ enabled: true });
+    if (decision.enabled) {
+      const wrapped = sandbox.wrapCommand({
+        bin, args, cwd: cwd || path.dirname(bin),
+        modelPath, slotSavePath, allowLanOut,
+      });
+      // macOS 需要把 profile 写到临时文件
+      if (wrapped.profileContent) {
+        const profilePath = path.join(os.tmpdir(), `llmanger-sandbox-${process.pid}-${Date.now()}.sb`);
+        fs.writeFileSync(profilePath, wrapped.profileContent, { mode: 0o600 });
+        fs.unlinkSync(profilePath); // 退出时清理（best effort）
+        wrapped.profilePath = profilePath;
+        realArgs = ['-f', profilePath, bin, ...args];
+      } else {
+        realArgs = wrapped.args;
+      }
+      cmd = wrapped.cmd;
+      setState('starting', { pid: -1, sandbox: decision.method });
+    } else {
+      send('engine:log', `[沙箱未启用] ${decision.reason}\n`);
+    }
+  }
+  proc = spawn(cmd, realArgs, {
     cwd: cwd || path.dirname(bin),
     env: { ...process.env },
   });

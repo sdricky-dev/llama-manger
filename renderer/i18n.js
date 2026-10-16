@@ -305,6 +305,16 @@ export const PARAMS = {
     desc: '启用 /metrics 端点（Prometheus 格式），可监控吞吐与队列。',
     showIf: (s) => s.mode === 'server',
   },
+  tools: {
+    label: 'Agent 工具',
+    flag: '--tools',
+    type: 'select',
+    options: ['none', 'read_only', 'all'],
+    def: 'none',
+    desc: '启用 llama.cpp 内置工具，让模型可以调用文件读取 / 文件查找 / 内容搜索 / 执行 shell / 写文件（agent 模式）。read_only 放行只读四项（read_file、file_glob_search、grep_search、get_info）；all 启用全部（含写文件、执行 shell，每次工具调用都会弹原生确认框）。',
+    related: '启用后启动的 server 会执行 --tools。read_only 会在下发前展开成引擎认识的具体工具名（引擎不认 read_only 这个取值，直接传会导致启动失败）。',
+    showIf: (s) => s.mode === 'server',
+  },
 
   // ---------- 高级 ----------
   ropeScaling: {
@@ -329,14 +339,6 @@ export const PARAMS = {
     related: '模型信息区会显示训练长度，直接填入即可。',
     advanced: true,
   },
-  mlock: {
-    label: '内存锁定 (mlock)',
-    flag: '--mlock',
-    type: 'check',
-    def: false,
-    desc: '锁定模型驻留内存，防止系统换页/压缩，可避免生成卡顿。需要系统有足够空闲内存。',
-    advanced: true,
-  },
   loadMode: {
     label: '加载模式',
     flag: '--load-mode',
@@ -344,7 +346,7 @@ export const PARAMS = {
     options: ['auto', 'mmap', 'mmap+mlock', 'mlock', 'dio', 'none'],
     def: 'auto',
     desc: '模型权重如何从磁盘进入内存。auto=自动（默认，设备支持就用 mmap）；mmap=内存映射，按需分页读入，模型比内存大也能跑（速度受 SSD 限制）；mlock / mmap+mlock=强制常驻内存，防换页与压缩；dio=DirectIO，绕过系统页缓存（省一份缓存占用，适合反复换模型）；none=不使用特殊加载方式。',
-    related: '模型大于可用内存时选 mmap 或 dio；想稳定不抖动选 mlock，但会挤占其它程序内存。',
+    related: '模型大于可用内存时选 mmap 或 dio；想稳定不抖动选 mlock，但会挤占其它程序内存。旧的独立开关 --mlock/--mmap/-dio 已被引擎删除，这里统一用 --load-mode 下发（老配置会自动翻译）。',
     advanced: true,
   },
   slotSavePath: {
@@ -436,11 +438,11 @@ export const GROUPS = [
   { id: 'attach', name: '附属文件（视觉 / 加速）', params: ['mmproj', 'mmprojOffload', 'specDraft', 'specDraftNgl', 'specType', 'specDraftNMax'] },
   { id: 'perf', name: '性能', params: ['threads', 'threadsBatch', 'batch', 'ubatch'] },
   { id: 'sampling', name: '采样', params: ['temp', 'topK', 'topP', 'minP', 'repeatPenalty', 'seed'] },
-  { id: 'server', name: 'API 服务 (llama-server)', params: ['host', 'port', 'apiKey', 'metrics'], mode: 'server' },
+  { id: 'server', name: 'API 服务 (llama-server)', params: ['host', 'port', 'apiKey', 'metrics', 'tools'], mode: 'server' },
   {
     id: 'advanced',
     name: '高级选项',
-    params: ['ropeScaling', 'yarnOrigCtx', 'mlock', 'loadMode', 'splitMode', 'tensorSplit', 'mainGpu', 'lora', 'slotSavePath', 'samplers', 'mirostat', 'mirostatLr', 'ignoreEos'],
+    params: ['ropeScaling', 'yarnOrigCtx', 'loadMode', 'splitMode', 'tensorSplit', 'mainGpu', 'lora', 'slotSavePath', 'samplers', 'mirostat', 'mirostatLr', 'ignoreEos'],
     advanced: true,
   },
 ];

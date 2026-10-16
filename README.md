@@ -88,17 +88,25 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **125 项全绿**）：
+`node:test` 单元测试（不依赖 Electron，当前 **373 项全绿**）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
 - `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
 - `test/recommend-discrete.test.js` — PC 双预算规划（9 种显存/内存组合 + 规划器与内存面板口径一致性不变量）
 - `test/memory.test.js` — 内存模型：ngl 比例、KV 精度/并行缩放、超限判定
 - `test/kv-geometry.test.js` — KV「哪些层、每层多大」：混合 SSM 的 recurrent 语义、MTP 层排除、`full_attention_interval` 兜底、gemma4 逐层 KV 头与 SWA 头维（含与引擎日志对齐的 8704 MiB 校验）
-- `test/args.test.js` — CLI 参数映射（对照 llama.cpp 源码核对过标志名）
+- `test/args.test.js` — CLI 参数映射（对照 llama.cpp 源码核对过标志名；含已删除的 `--mlock/--mmap/-dio` 不再下发、`--tools read_only` 展开）
+- `test/migrate.test.js` — 旧参数迁移：`--mmap/--mlock/-dio` → `--load-mode`（含 `loadMode:'auto'` 不吞掉旧字段）
 - `test/role.test.js` — 文件角色 / 量化实测 / decision 类型 / 附属文件归组
 - `test/spec.test.js` — 投机解码类型与模型能力的匹配矩阵
+- `test/agent.test.js` — Agent 工具分类、`--tools` 展开（过滤引擎不认识的名字）、tool_calls 状态机
 - `test/slots.test.js` — 会话存盘的磁盘操作（文件名校验 / 列目录 / 删除 / 防路径穿越）
+- `test/sessions.test.js` — 会话存档 JSONL 读写与导出
+- `test/anthropic.test.js` — Anthropic Messages ↔ OpenAI Chat 适配层
+- `test/multimodal.test.js` — 图片 MIME 识别与多模态消息构造
+- `test/bench.test.js` — llama-bench JSON 解析与 TTFT/吞吐提取
+- `test/hf.test.js` — HuggingFace 模型列表与下载
+- `test/sandbox.test.js` — 子进程沙箱能力探测与启用判定
 - `test/hardware.test.js` — 跨平台硬件解析（nvidia-smi / 注册表显存 / WMI 溢出兜底 / lscpu / 多卡取最大）
 - `test/engine.test.js` — 引擎二进制候选与终端启动命令（`.exe`、`launch.cmd` 转义、各平台终端链）
 - `test/reveal.test.js` — 「在文件夹中显示」的目标解析（文件高亮 / 目录直接打开 / 文件已消失时报错）
