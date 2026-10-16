@@ -1,5 +1,7 @@
 # LlamaManger 🦙
 
+[![CI](https://github.com/sdricky-dev/llama-manger/actions/workflows/ci.yml/badge.svg)](https://github.com/sdricky-dev/llama-manger/actions/workflows/ci.yml)
+
 llama.cpp 一键启动器（Electron 桌面应用）。
 
 选一个 `.gguf` 模型 → 点 **⚡ 一键生成配置** → 应用根据你的**本机硬件**（Apple Silicon / 内存 / GPU）和**模型架构**（GGUF 元数据：层数、KV 头数、训练上下文、MoE 专家数…）自动算出一整套合理参数 → 直接启动 **llama-server（API 服务，带内嵌流式聊天）** 或 **llama-cli（系统终端对话）**。
