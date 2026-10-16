@@ -375,9 +375,11 @@ app.whenReady().then(() => {
   // ---------- 剪贴板 ----------
   // 走主进程写剪贴板：渲染层的 navigator.clipboard 要求文档处于聚焦状态，
   // 窗口失焦时会直接失败（Document is not focused）。
-  ipcMain.handle('clipboard:write', (_e, text) => {
+  // 注意：Electron 44 起 clipboard 对齐 W3C Clipboard API，writeText 变成异步，
+  // 必须 await —— 否则会"先返回 ok 再落盘"，写失败也变成未捕获的 rejection。
+  ipcMain.handle('clipboard:write', async (_e, text) => {
     const s = String(text ?? '');
-    clipboard.writeText(s);
+    await clipboard.writeText(s);
     return { ok: true, length: s.length };
   });
 

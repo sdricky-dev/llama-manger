@@ -35,6 +35,9 @@ npm install
 npm start
 ```
 
+> 环境要求：Node 20+（单测跑在 20/22 上）；macOS 需 13 (Ventura) 以上（Electron 44 起不再支持 macOS 12）；Windows/Linux 为 64 位（Electron 44 起不再发布 32 位 Windows 与 Linux ARMv7 预编译包）。
+> 若 `npm install` 之后 Electron 二进制没下载（npm 11 的 allowScripts 或网络原因），执行：`cd node_modules/electron && ELECTRON_MIRROR=https://cdn.npmmirror.com/binaries/electron/ node install.js`
+
 1. 在 **① 选择模型** 填入模型目录（默认 `~/models`），点「重新扫描」。
 2. 点击模型卡片 → 点 **⚡ 一键生成配置**（右侧内存条与命令预览实时更新）。
 3. **③ 启动引擎** → 「启动」。server 模式就绪后可直接在下方对话框聊天；cli 模式会在系统终端打开。
