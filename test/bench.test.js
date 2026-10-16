@@ -244,9 +244,11 @@ test('buildBenchArgs：ngl "auto" 不下发', () => {
   assert.ok(!a.includes('-ngl'));
 });
 
-test('buildBenchArgs：ctx 0 不下发', () => {
-  const a = buildBenchArgs({ modelPath: '/m', params: { ctx: 0 } });
-  assert.ok(!a.includes('-c'));
+test('buildBenchArgs：绝不下发 -c（llama-bench 没有 ctx-size 参数）', () => {
+  // 带上 -c 会让 llama-bench 打印用法、不跑测试 → 界面「跑基准」永远拿不到 JSON。
+  // 回归守门在 scripts/check-engine-flags.js（对照引擎 --help 检查所有下发的 flag）。
+  assert.ok(!buildBenchArgs({ modelPath: '/m', params: { ctx: 0 } }).includes('-c'));
+  assert.ok(!buildBenchArgs({ modelPath: '/m', params: { ctx: 262144 } }).includes('-c'));
 });
 
 test('buildBenchArgs：cacheTypeK 非 f16 才下发 -ctk', () => {

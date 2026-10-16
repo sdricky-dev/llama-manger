@@ -69,6 +69,17 @@ Windows 用 PowerShell 脚本（同样需要 `cmake` / `ninja` 在 PATH 中）�
 .\scripts\build-engine.ps1
 ```
 
+### 更新引擎后跑一次参数漂移检查
+
+上游经常删参数 / 改名（例如 `14a9d09f7` 删掉了 `--mlock`、`--mmap`、`-dio`），而项目把命令行的每个 flag 都写死在 `shared/args.js` 里。**单测只能验证"我们下发了什么"，验证不了"引擎还认不认"** —— 这类问题只会在真机启动时爆出来（`error: invalid argument: --mlock`）。
+
+```bash
+npm run check:engine                        # 自动探测 ~/llama.cpp/build、~/Documents/GitHub/llama.cpp/build
+npm run check:engine -- /path/to/build      # 或显式指定（也可用 LLAMA_CPP_BUILD=<目录>）
+```
+
+它会把 `shared/args.js` / `main/bench.js` 里会下发的**每一个** flag 拿去比对本地引擎 `--help` 的声明，报出引擎不认识的那些（flag 清单是扫源码得到的，新增参数自动覆盖，不用手工维护）。建议在每次 `build-engine.sh` 之后跑一次。
+
 ### 判决(decision)模型兼容补丁（可选）
 
 部分第三方导出的判决模型把 `*.decision.type` 写成 `jev`，而引擎类型表里只有 `openjev`（两者的 `systemone` 模板与 `temperature/verbalizer_ids/bias.{noul,score,choice}` 元数据结构完全一致），不打补丁会在加载阶段直接退出：
@@ -93,7 +104,7 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **382 项全绿**，CI 在 Node 22/24 上跑）：
+`node:test` 单元测试（不依赖 Electron，当前 **394 项全绿**，CI 在 Node 22/24 上跑）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
 - `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
@@ -114,6 +125,7 @@ npm test
 - `test/sandbox.test.js` — 子进程沙箱能力探测与启用判定
 - `test/hardware.test.js` — 跨平台硬件解析（nvidia-smi / 注册表显存 / WMI 溢出兜底 / lscpu / 多卡取最大）
 - `test/engine.test.js` — 引擎二进制候选与终端启动命令（`.exe`、`launch.cmd` 转义、各平台终端链）
+- `test/engine-flags.test.js` — 参数漂移检查的解析层（flag 抽取 / 帮助文本解析 / 差集），含对真实 `args.js`、`bench.js` 的回归断言
 - `test/reveal.test.js` — 「在文件夹中显示」的目标解析（文件高亮 / 目录直接打开 / 文件已消失时报错）
 - `test/paths.test.js` — 渲染层路径工具（Windows 反斜杠路径的取目录 / 拼路径）
 

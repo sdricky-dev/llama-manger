@@ -183,7 +183,12 @@ function pickTtftMs(rec) {
  * 把启动参数对象翻译为 llama-bench 命令行参数。
  * 与 shared/args.js 的 buildArgs 对齐，但只取 bench 关心的字段。
  *
- * @param {object} opts { modelPath, params:{ngl, ctx, flashAttn, cacheTypeK, cacheTypeV, threads, ...} }
+ * 注意：llama-bench **没有** `-c/--ctx-size`（它的 n_ctx 由 n_prompt + n_gen + n_depth
+ * 内部推导，只有 `-fitc` 是给 --fit-target 用的）。早先这里会下发 `-c <ctx>`，
+ * 结果是 llama-bench 直接打印用法、不跑测试 → 界面上的「跑基准」永远拿不到 JSON。
+ * 这类"上游不认的参数"由 scripts/check-engine-flags.js 兜底检查。
+ *
+ * @param {object} opts { modelPath, params:{ngl, flashAttn, cacheTypeK, cacheTypeV, threads, ...} }
  * @returns {string[]}
  */
 function buildBenchArgs({ modelPath, params = {} }) {
@@ -192,9 +197,6 @@ function buildBenchArgs({ modelPath, params = {} }) {
   a.push('-o', 'json');
   if (params.ngl !== undefined && params.ngl !== '' && params.ngl !== 'auto') {
     a.push('-ngl', String(params.ngl === 'all' ? 99 : params.ngl));
-  }
-  if (params.ctx && Number(params.ctx) > 0) {
-    a.push('-c', String(params.ctx));
   }
   if (params.threads && Number(params.threads) > 0) {
     a.push('-t', String(params.threads));

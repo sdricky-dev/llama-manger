@@ -7,6 +7,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test test/*.test.js",
+    "check:engine": "node scripts/check-engine-flags.js",
     "pack:mac": "electron-builder --mac",
     "pack:win": "electron-builder --win",
     "pack:linux": "electron-builder --linux",
