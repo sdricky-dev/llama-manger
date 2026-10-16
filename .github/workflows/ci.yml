@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 单元测试（node:test）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 本地开发用的是 Node 26；跑 LTS 兜底，确认 node:test 用法向下兼容
+        node-version: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: 安装依赖
+        # 单测不启动 Electron，跳过约 100MB 的二进制下载
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: npm ci
+
+      - name: 跑单测
+        run: npm test
+
+  # 说明：e2e/ 下的脚本需要真实 Electron 窗口 + 本机 GGUF 模型，
+  # 不适合云端 CI。本地跑法见 e2e/README.md：
+  #   env -u ELECTRON_RUN_AS_NODE npx electron . --remote-debugging-port=9222
+  #   LM_MODELS_DIR=~/.lmstudio/models node e2e/cdp-eval.js e2e/step21-mac-server.js
