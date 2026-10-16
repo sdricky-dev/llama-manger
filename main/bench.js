@@ -55,8 +55,8 @@ function scoreTier(score) {
  * 解析 llama-bench 的 JSON 输出。
  * 输入：stdout 字符串（可能含 BOM / 末尾换行 / 多余空格）
  * 输出：测试记录数组，每条形如
- *   { model_type, model_size, model_params, n_prompt, n_gen,
- *     n_gpu_layers, type_k, type_v, n_threads, avg_ts, stddev_ts, ... }
+ *   { model_type, model_size, model_n_params, n_prompt, n_gen,
+ *     n_gpu_layers, type_k, type_v, n_threads, avg_ns, avg_ts, stddev_ts, ... }
  *
  * 容错：
  *   - 顶层是数组；不是数组则抛错
@@ -82,7 +82,7 @@ function parseBenchJson(stdout) {
  *   - 找第一条 n_prompt>0 且 n_gen===0 的（prompt eval）
  *   - 找第一条 n_prompt===0 且 n_gen>0 的（generation）
  *   - 若 n_prompt>0 且 n_gen>0 都给（混合），则拆成两个测试分别取
- *   - ttftMs：llama-bench 在 prompt eval 记录里有 samples_ms 数组，首个样本即首 token 时间
+ *   - ttftMs：纯 prompt eval 记录（-p N -n 0）的 avg_ns 就是首 token 耗时
  *
  * @param {object[]} records
  * @returns {{
@@ -125,7 +125,8 @@ function summarizeBench(records) {
     ttftMs,
     modelType: typeof first.model_type === 'string' ? first.model_type : null,
     modelSize: typeof first.model_size === 'number' ? first.model_size : null,
-    modelParams: typeof first.model_params === 'number' ? first.model_params : null,
+    // llama-bench 的 JSON 字段是 model_n_params（不是 model_params）
+    modelParams: typeof first.model_n_params === 'number' ? first.model_n_params : null,
     ngl: typeof first.n_gpu_layers === 'number' ? first.n_gpu_layers : null,
     typeK: typeof first.type_k === 'string' ? first.type_k : null,
     typeV: typeof first.type_v === 'string' ? first.type_v : null,
@@ -146,22 +147,35 @@ function pickTps(rec) {
 }
 
 /**
- * TTFT：llama-bench 把 prompt eval 的每个 batch 耗时记录在 samples_ms 里。
- * 第一条样本就是"首 token 到达前"的时间，最贴近 TTFT 语义。
- * 若记录里没有 samples_ms 数组，则退化为 avg_ms / n_prompt（粗估）。
+ * TTFT（首 token 时间，毫秒）
+ *
+ * llama-bench 的 JSON 里，每条记录由 get_fields() 输出
+ * avg_ns / stddev_ns / avg_ts / stddev_ts，**之外**还额外追加两个数组
+ * （llama-bench.cpp:1823）：samples_ns（每次重复的耗时，纳秒）与 samples_ts（对应 tok/s）。
+ * 本项目早期误读成 `samples_ms`（字段名与单位都不对），导致 TTFT 恒为 null。
+ *
+ *   - 纯 prompt eval 记录（-p N -n 0）：一次重复的耗时就是"跑完整个 prompt"的时间，
+ *     即首 token 到达前的时间 → 取 avg_ns / 1e6（多次重复取平均，比首个样本更稳）
+ *   - 只有混合记录（n_prompt>0 且 n_gen>0）时：按 avg_ts 反推 prompt 段耗时
+ *     （假设 prefill/decode 均速，偏乐观，仅作参考）
  */
 function pickTtftMs(rec) {
   if (!rec) return null;
-  if (Array.isArray(rec.samples_ms) && rec.samples_ms.length > 0) {
-    const first = Number(rec.samples_ms[0]);
-    if (Number.isFinite(first) && first > 0) return first;
-  }
-  const avg = Number(rec.avg_ms);
   const np = Number(rec.n_prompt);
-  if (Number.isFinite(avg) && Number.isFinite(np) && np > 0) {
-    // 单 batch 整段 prompt 处理耗时；不能直接当 TTFT，但可作上限参考
-    return null;
+  const ng = Number(rec.n_gen) || 0;
+
+  if (np > 0 && ng === 0) {
+    const ns = Number(rec.avg_ns);
+    if (Number.isFinite(ns) && ns > 0) return ns / 1e6;
+    // 没有 avg_ns 时退回首个样本（samples_ns 单位是纳秒）
+    if (Array.isArray(rec.samples_ns) && rec.samples_ns.length > 0) {
+      const first = Number(rec.samples_ns[0]);
+      if (Number.isFinite(first) && first > 0) return first / 1e6;
+    }
   }
+
+  const ts = Number(rec.avg_ts);
+  if (np > 0 && Number.isFinite(ts) && ts > 0) return (np / ts) * 1000;
   return null;
 }
 

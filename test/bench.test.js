@@ -102,20 +102,20 @@ test('summarizeBench：prompt + gen 两条记录合成', () => {
     {
       model_type: 'qwen2',
       model_size: 4_500_000_000,
-      model_params: 1_500_000_000,
+      model_n_params: 1_500_000_000,
       n_gpu_layers: 99,
       type_k: 'f16',
       type_v: 'f16',
       n_threads: 8,
       n_prompt: 512,
       n_gen: 0,
+      avg_ns: 110_000_000,
       avg_ts: 200.0,
-      samples_ms: [110, 1020, 1015],
     },
     {
       model_type: 'qwen2',
       model_size: 4_500_000_000,
-      model_params: 1_500_000_000,
+      model_n_params: 1_500_000_000,
       n_gpu_layers: 99,
       type_k: 'f16',
       type_v: 'f16',
@@ -128,12 +128,18 @@ test('summarizeBench：prompt + gen 两条记录合成', () => {
   const s = summarizeBench(records);
   assert.equal(s.promptTps, 200.0);
   assert.equal(s.genTps, 25.0);
-  assert.equal(s.ttftMs, 110);
+  assert.equal(s.ttftMs, 110, 'avg_ns 110ms → TTFT 110ms（纯 prompt eval）');
   assert.equal(s.modelType, 'qwen2');
+  assert.equal(s.modelParams, 1_500_000_000, '上游字段是 model_n_params');
   assert.equal(s.ngl, 99);
   assert.equal(s.nPrompt, 512);
   assert.equal(s.nGen, 128);
   assert.equal(s.localScore > 0, true);
+});
+
+test('summarizeBench：只有 model_params（旧字段名）时参数量为 null', () => {
+  const s = summarizeBench([{ model_type: 'qwen2', model_params: 1_500_000_000, n_prompt: 512, n_gen: 0, avg_ts: 100 }]);
+  assert.equal(s.modelParams, null);
 });
 
 test('summarizeBench：缺少 prompt 记录时 TTFT 为 null', () => {
@@ -148,7 +154,7 @@ test('summarizeBench：缺少 prompt 记录时 TTFT 为 null', () => {
 
 test('summarizeBench：只有 prompt 记录时 gen 为 null', () => {
   const records = [
-    { model_type: 'qwen2', n_prompt: 512, n_gen: 0, avg_ts: 100.0, samples_ms: [120] },
+    { model_type: 'qwen2', n_prompt: 512, n_gen: 0, avg_ts: 100.0, avg_ns: 120_000_000 },
   ];
   const s = summarizeBench(records);
   assert.equal(s.promptTps, 100.0);
@@ -156,14 +162,15 @@ test('summarizeBench：只有 prompt 记录时 gen 为 null', () => {
   assert.equal(s.ttftMs, 120);
 });
 
-test('summarizeBench：混合 n_prompt>0 且 n_gen>0 时退化为取首条', () => {
+test('summarizeBench：只有混合记录时 TTFT 用 n_prompt/avg_ts 估算', () => {
   const records = [
-    { model_type: 'qwen2', n_prompt: 512, n_gen: 128, avg_ts: 80.0, samples_ms: [200] },
+    { model_type: 'qwen2', n_prompt: 512, n_gen: 128, avg_ts: 80.0 },
   ];
   const s = summarizeBench(records);
   // 优先 n_prompt>0 && n_gen===0；没有就退而求其次取首条
   assert.equal(s.promptTps, 80.0);
-  assert.equal(s.ttftMs, 200);
+  // 混合记录没有单独的 prefill 耗时，按 512 / 80 tok/s ≈ 6400ms 估算
+  assert.equal(s.ttftMs, 6400);
 });
 
 test('summarizeBench：空数组返回全 null + score=0', () => {
@@ -174,18 +181,28 @@ test('summarizeBench：空数组返回全 null + score=0', () => {
   assert.equal(s.localScore, 0);
 });
 
-test('summarizeBench：samples_ms 为空数组时 TTFT 走 null（不留 NaN）', () => {
+test('summarizeBench：prompt 记录缺 avg_ns 时退回 samples_ns[0]（真实 JSON 有这两个字段）', () => {
+  const s = summarizeBench([{ n_prompt: 512, n_gen: 0, avg_ts: 100.0, samples_ns: [210_745_417, 212_097_083] }]);
+  assert.equal(s.ttftMs, 210.745417);
+});
+
+test('summarizeBench：prompt 记录既无 avg_ns 也无 samples_ns 时退回 avg_ts 估算（不留 NaN）', () => {
   const records = [
-    { n_prompt: 512, n_gen: 0, avg_ts: 100.0, samples_ms: [] },
+    { n_prompt: 512, n_gen: 0, avg_ts: 100.0 },
   ];
   const s = summarizeBench(records);
-  assert.equal(s.ttftMs, null);
+  assert.equal(s.ttftMs, 5120);
   assert.equal(Number.isFinite(s.localScore), true);
+});
+
+test('summarizeBench：prompt 记录既无 avg_ns 也无 avg_ts → TTFT null', () => {
+  const s = summarizeBench([{ n_prompt: 512, n_gen: 0 }]);
+  assert.equal(s.ttftMs, null);
 });
 
 test('summarizeBench：0/负值 TPS 视作无效', () => {
   const records = [
-    { n_prompt: 512, n_gen: 0, avg_ts: 0, samples_ms: [100] },
+    { n_prompt: 512, n_gen: 0, avg_ts: 0 },
     { n_prompt: 0, n_gen: 128, avg_ts: -1 },
   ];
   const s = summarizeBench(records);
