@@ -23,6 +23,10 @@ let win = null;
 
 function createWindow() {
   win = new BrowserWindow({
+    // 窗口位置/尺寸/显示模式跨启动记忆（Electron 44 起内置，标注为 Experimental）。
+    // `name` 是必填项：不提供时 windowStatePersistence 不生效。
+    name: 'main',
+    windowStatePersistence: true,
     width: 1360,
     height: 900,
     minWidth: 1024,
