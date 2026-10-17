@@ -62,7 +62,7 @@
         <span class="oneclick-hint">基于本机硬件 + 模型架构自动计算推荐值（每个参数可单独修改，修改后实时重算内存）</span>
         <label class="adv-label"><input type="checkbox" id="advToggle" /> 高级选项</label>
         <button id="btnFitCheck" class="btn ghost" title="调用 llama-fit-params 引擎自检（信息性输出）">引擎自检</button>
-        <button id="btnBench" class="btn ghost" title="用 llama-bench 跑本机实测：prompt TPS / 生成 TPS / TTFT / LocalScore">⚡ 跑基准</button>
+        <button id="btnBench" class="btn ghost" title="打开基准测试面板：可按不同上下文深度、指定重复次数实测 prompt TPS / 生成 TPS / TTFT / LocalScore">⚡ 基准测试</button>
       </div>
 
       <div id="hints" class="hints"></div>
@@ -72,15 +72,47 @@
           <span class="bench-title">📊 本机基准（仿 LocalScore）</span>
           <span id="benchStatus" class="bench-status">—</span>
         </div>
+
+        <div class="bench-config">
+          <label class="bench-field">
+            <span>上下文深度</span>
+            <input id="benchDepths" value="0" spellcheck="false" placeholder="0,4096,16384"
+                   title="llama-bench -d：先往 KV 缓存灌 N 个 token 再测，模拟长上下文。可填多个（逗号分隔，支持 4k/16k），一次运行全部跑完" />
+          </label>
+          <div class="bench-chips" id="benchCtxChips">
+            <button type="button" data-depth="0">0</button>
+            <button type="button" data-depth="4096">4K</button>
+            <button type="button" data-depth="8192">8K</button>
+            <button type="button" data-depth="16384">16K</button>
+            <button type="button" data-depth="32768">32K</button>
+            <button type="button" data-depth="65536">64K</button>
+            <button type="button" data-depth="131072">128K</button>
+          </div>
+          <label class="bench-field short">
+            <span>重复次数</span>
+            <input id="benchReps" type="number" min="1" max="99" step="1" value="5"
+                   title="llama-bench -r：每个测试重复几次后取平均" />
+          </label>
+          <button id="btnBenchRun" class="btn primary">▶ 开始测试</button>
+        </div>
+
         <div id="benchBody" class="bench-body hidden">
-          <div class="bench-grid">
+          <div class="bench-grid" id="benchGrid">
             <div class="bench-item"><b id="benchPromptTps">—</b><span>Prompt TPS</span></div>
             <div class="bench-item"><b id="benchGenTps">—</b><span>生成 TPS</span></div>
             <div class="bench-item"><b id="benchTtftMs">—</b><span>首 token (ms)</span></div>
             <div class="bench-item"><b id="benchLocalScore">—</b><span>LocalScore</span></div>
           </div>
           <div id="benchMeta" class="bench-meta">—</div>
-          <div class="bench-note">LocalScore = 10·∛(promptTPS · genTPS · 1000/TTFT)。≥1000 优秀，≥250 可用，≥100 一般。基准结果与启动参数一致；改了 ngl/ctx/threads 后重新跑才能反映新配置的性能。</div>
+          <div id="benchTableWrap" class="bench-table-wrap hidden">
+            <table class="bench-table">
+              <thead>
+                <tr><th>上下文深度</th><th>Prompt t/s</th><th>生成 t/s</th><th>首 token (ms)</th><th>LocalScore</th></tr>
+              </thead>
+              <tbody id="benchTableBody"></tbody>
+            </table>
+          </div>
+          <div class="bench-note">深度 = 先用 N 个 token 填满 KV 缓存再测（模拟长上下文对话）；每个深度各测一次 prompt 与生成，重复 <span id="benchNoteReps">5</span> 次取平均。多个深度在同一次运行里跑完，模型只加载一次。LocalScore = 10·∛(promptTPS · genTPS · 1000/TTFT)，≥1000 优秀，≥250 可用，≥100 一般。</div>
         </div>
       </div>
 

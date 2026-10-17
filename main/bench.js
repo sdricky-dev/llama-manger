@@ -180,6 +180,96 @@ function pickTtftMs(rec) {
 }
 
 /**
+ * 解析上下文深度输入。
+ *
+ * llama-bench 的 `-d/--n-depth` 是**向量参数**：`-d 0,4096,16384` 会在一次运行里
+ * 依次测完多个深度（模型只加载一次）。深度含义：先往 KV 缓存里灌 N 个 token，
+ * 再测 prompt 处理 / 生成 —— 也就是"上下文已经被占用到 N"时的性能。
+ * 它的 n_ctx 由 n_prompt + n_gen + n_depth 内部推导，不需要（也没有）`-c`。
+ *
+ * 接受：数组、`"0,4096,16384"`、`"4k,16k"`（大小写 k/m 都行）。
+ * 输出：去重、升序、只保留非负整数；全非法时返回 []（调用方按默认 0 处理）。
+ *
+ * @param {string|number[]} [input]
+ * @returns {number[]}
+ */
+function parseDepths(input) {
+  const raw = Array.isArray(input) ? input : String(input ?? '').split(/[,，\s]+/);
+  const out = new Set();
+  for (const v of raw) {
+    if (v === '' || v === null || v === undefined) continue;
+    const m = String(v).trim().match(/^(\d+(?:\.\d+)?)\s*([kKmM]?)$/);
+    if (!m) continue;
+    const unit = m[2].toLowerCase();
+    const mult = unit === 'k' ? 1024 : unit === 'm' ? 1024 * 1024 : 1;
+    const n = Math.round(Number(m[1]) * mult);
+    if (Number.isFinite(n) && n >= 0) out.add(n);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * 按 n_depth 分组，逐深度汇总（多上下文基准的核心）。
+ *
+ * llama-bench 对每个深度会产出两条记录：prompt-only 与 gen-only，
+ * 两条都带 n_depth 字段。老版本引擎没有 n_depth 时全部归到 0。
+ *
+ * @param {object[]} records parseBenchJson 的结果
+ * @returns {{summary: object, byDepth: Array<{depth:number, promptTps:number|null, genTps:number|null, ttftMs:number|null, localScore:number, nPrompt:number|null, nGen:number|null}>}}
+ *   summary 为第一个深度的汇总（保持与原单深度调用方的兼容）
+ */
+function summarizeByDepth(records) {
+  const list = Array.isArray(records) ? records : [];
+  const groups = new Map();
+  for (const r of list) {
+    const d = Number(r.n_depth);
+    const depth = Number.isFinite(d) && d >= 0 ? d : 0;
+    if (!groups.has(depth)) groups.set(depth, []);
+    groups.get(depth).push(r);
+  }
+
+  const byDepth = [...groups.keys()].sort((a, b) => a - b).map((depth) => {
+    const s = summarizeBench(groups.get(depth));
+    return {
+      depth,
+      promptTps: s.promptTps,
+      genTps: s.genTps,
+      ttftMs: s.ttftMs,
+      localScore: s.localScore,
+      nPrompt: s.nPrompt,
+      nGen: s.nGen,
+    };
+  });
+
+  const summary = byDepth.length ? summarizeBench(groups.get(byDepth[0].depth)) : summarizeBench([]);
+  return { summary, byDepth };
+}
+
+/**
+ * 把上下文深度裁剪到模型能承受的范围。
+ *
+ * llama-bench 的 n_ctx = n_prompt + n_gen + n_depth，超过模型训练上下文时它**不会报错**，
+ * 而是真的去分配并填满超长 KV —— 实测 -d 300000 在 256K 模型上会卡数分钟（还占满内存）。
+ * 所以按 ctxTrain - nPrompt - nGen 封顶，超出的深度直接跳过并回报，让界面提示用户。
+ *
+ * @param {string|number[]} depths
+ * @param {number} ctxTrain 模型训练上下文（0/未知则不限制）
+ * @param {number} [nPrompt]
+ * @param {number} [nGen]
+ * @returns {{kept:number[], skipped:number[], limit:number|null}}
+ */
+function fitDepths(depths, ctxTrain, nPrompt = 512, nGen = 128) {
+  const list = parseDepths(depths);
+  const ctx = Number(ctxTrain);
+  if (!Number.isFinite(ctx) || ctx <= 0) return { kept: list, skipped: [], limit: null };
+  const limit = Math.max(0, Math.floor(ctx) - Number(nPrompt) - Number(nGen));
+  const kept = [];
+  const skipped = [];
+  for (const d of list) (d <= limit ? kept : skipped).push(d);
+  return { kept, skipped, limit };
+}
+
+/**
  * 把启动参数对象翻译为 llama-bench 命令行参数。
  * 与 shared/args.js 的 buildArgs 对齐，但只取 bench 关心的字段。
  *
@@ -188,10 +278,11 @@ function pickTtftMs(rec) {
  * 结果是 llama-bench 直接打印用法、不跑测试 → 界面上的「跑基准」永远拿不到 JSON。
  * 这类"上游不认的参数"由 scripts/check-engine-flags.js 兜底检查。
  *
- * @param {object} opts { modelPath, params:{ngl, flashAttn, cacheTypeK, cacheTypeV, threads, ...} }
+ * @param {object} opts { modelPath, params:{ngl, flashAttn, cacheTypeK, cacheTypeV, threads, ...},
+ *                        bench:{depths, reps, nPrompt, nGen} }
  * @returns {string[]}
  */
-function buildBenchArgs({ modelPath, params = {} }) {
+function buildBenchArgs({ modelPath, params = {}, bench = {} }) {
   const a = ['-m', String(modelPath)];
   // 强制 JSON 输出
   a.push('-o', 'json');
@@ -204,8 +295,22 @@ function buildBenchArgs({ modelPath, params = {} }) {
   if (params.cacheTypeK && params.cacheTypeK !== 'f16') a.push('-ctk', String(params.cacheTypeK));
   if (params.cacheTypeV && params.cacheTypeV !== 'f16') a.push('-ctv', String(params.cacheTypeV));
   if (params.flashAttn && params.flashAttn !== 'auto') a.push('-fa', String(params.flashAttn));
+
+  const nPrompt = Number(bench.nPrompt) > 0 ? Math.floor(Number(bench.nPrompt)) : 512;
+  const nGen = Number(bench.nGen) > 0 ? Math.floor(Number(bench.nGen)) : 128;
   // prompt 512 + gen 128：与 upstream 默认一致；足够反映稳态性能
-  a.push('-p', '512', '-n', '128');
+  a.push('-p', String(nPrompt), '-n', String(nGen));
+
+  // 上下文深度（多选一次跑完）：0 是引擎默认值，不必显式下发
+  const depths = parseDepths(bench.depths);
+  if (depths.length > 0 && !(depths.length === 1 && depths[0] === 0)) {
+    a.push('-d', depths.join(','));
+  }
+
+  // 重复次数（llama-bench 默认 5；上限挡一下，避免误填 1e9 跑一整天）
+  const reps = Number(bench.reps);
+  if (Number.isFinite(reps) && reps >= 1) a.push('-r', String(Math.min(Math.floor(reps), 99)));
+
   return a;
 }
 
@@ -214,13 +319,23 @@ function buildBenchArgs({ modelPath, params = {} }) {
 /**
  * 跑一次基准测试。
  *
- * @param {{bin:string, modelPath:string, params:object, timeoutMs?:number}} o
+ * @param {{bin:string, modelPath:string, params:object, bench?:object, timeoutMs?:number}} o
+ *   bench: { depths, reps, nPrompt, nGen } —— 深度可多个，一次 spawn 跑完
  * @param {{onLog?:Function}} [cb]
- * @returns {Promise<{ok:boolean, summary:object, rawStdout:string, error?:string}>}
+ * @returns {Promise<{ok:boolean, summary:object, byDepth:object[], rawStdout:string, error?:string}>}
  */
-function runBench({ bin, modelPath, params, timeoutMs = 120000 }, cb = {}) {
+function runBench({ bin, modelPath, params, bench = {}, timeoutMs }, cb = {}) {
   return new Promise((resolve) => {
-    const args = buildBenchArgs({ modelPath, params });
+    // 深度上限的兜底：渲染层已经按模型上下文裁过，这里再挡一次（界面逻辑改动不会让引擎跑飞）
+    const fit = fitDepths(bench.depths, bench.ctxTrain, bench.nPrompt || 512, bench.nGen || 128);
+    const args = buildBenchArgs({ modelPath, params, bench: { ...bench, depths: fit.kept } });
+    const depths = fit.kept;
+    const nDepths = Math.max(1, depths.length);
+    const reps = Math.max(1, Math.min(99, Math.floor(Number(bench.reps)) || 5));
+    // 超时按「深度数 × 重复次数」放大：深上下文每次都要重新预填 KV，比 depth 0 慢得多
+    const limitMs = Number(timeoutMs) > 0
+      ? Number(timeoutMs)
+      : Math.min(30 * 60 * 1000, 120000 + 12000 * nDepths * reps);
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -237,7 +352,7 @@ function runBench({ bin, modelPath, params, timeoutMs = 120000 }, cb = {}) {
         cwd: process.cwd(),
       });
     } catch (err) {
-      done({ ok: false, summary: null, rawStdout: '', error: `启动失败: ${err.message}` });
+      done({ ok: false, summary: null, byDepth: [], rawStdout: '', error: `启动失败: ${err.message}` });
       return;
     }
 
@@ -245,8 +360,8 @@ function runBench({ bin, modelPath, params, timeoutMs = 120000 }, cb = {}) {
 
     const timer = setTimeout(() => {
       try { p.kill('SIGKILL'); } catch {}
-      done({ ok: false, summary: null, rawStdout: stdout, error: `超时（${timeoutMs}ms）` });
-    }, timeoutMs);
+      done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: `超时（${Math.round(limitMs / 1000)}s）` });
+    }, limitMs);
 
     p.stdout.on('data', (d) => {
       const t = d.toString();
@@ -260,20 +375,20 @@ function runBench({ bin, modelPath, params, timeoutMs = 120000 }, cb = {}) {
     });
     p.on('error', (err) => {
       clearTimeout(timer);
-      done({ ok: false, summary: null, rawStdout: stdout, error: `启动失败: ${err.message}` });
+      done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: `启动失败: ${err.message}` });
     });
     p.on('exit', (code) => {
       clearTimeout(timer);
       if (code !== 0 && !stdout) {
-        done({ ok: false, summary: null, rawStdout: stdout, error: `exit=${code} stderr=${stderr.slice(-500)}` });
+        done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: `exit=${code} stderr=${stderr.slice(-500)}` });
         return;
       }
       try {
         const records = parseBenchJson(stdout);
-        const summary = summarizeBench(records);
-        done({ ok: true, summary, rawStdout: stdout });
+        const { summary, byDepth } = summarizeByDepth(records);
+        done({ ok: true, summary, byDepth, skippedDepths: fit.skipped, rawStdout: stdout });
       } catch (err) {
-        done({ ok: false, summary: null, rawStdout: stdout, error: err.message });
+        done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: err.message });
       }
     });
   });
@@ -283,7 +398,10 @@ module.exports = {
   localScore,
   scoreTier,
   parseBenchJson,
+  parseDepths,
+  fitDepths,
   summarizeBench,
+  summarizeByDepth,
   buildBenchArgs,
   runBench,
 };

@@ -8,6 +8,8 @@
  *   - parseBenchJson 解析 / 容错
  *   - summarizeBench 多记录汇总 + TTFT 选取
  *   - buildBenchArgs 参数翻译
+ *   - parseDepths 上下文深度解析（多深度 / 4k 写法 / 去重排序）
+ *   - summarizeByDepth 按深度分组汇总
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,6 +18,9 @@ const {
   scoreTier,
   parseBenchJson,
   summarizeBench,
+  summarizeByDepth,
+  parseDepths,
+  fitDepths,
   buildBenchArgs,
 } = require('../main/bench');
 
@@ -268,4 +273,121 @@ test('buildBenchArgs：flashAttn 非 auto 才下发', () => {
 test('buildBenchArgs：threads 0 不下发', () => {
   const a = buildBenchArgs({ modelPath: '/m', params: { threads: 0 } });
   assert.ok(!a.includes('-t'));
+});
+/* ---------- parseDepths ---------- */
+
+test('parseDepths：逗号/空格/中文逗号混用，去重升序', () => {
+  assert.deepEqual(parseDepths('0, 4096，8192 4096'), [0, 4096, 8192]);
+});
+
+test('parseDepths：支持 4k / 16K / 1m 写法（1024 进制）', () => {
+  assert.deepEqual(parseDepths('4k,16K'), [4096, 16384]);
+  assert.deepEqual(parseDepths('1m'), [1024 * 1024]);
+});
+
+test('parseDepths：非法项丢弃，空输入返回空数组', () => {
+  assert.deepEqual(parseDepths('abc, -1, ,4x'), []);
+  assert.deepEqual(parseDepths(''), []);
+  assert.deepEqual(parseDepths(undefined), []);
+});
+
+test('parseDepths：数组输入也接受', () => {
+  assert.deepEqual(parseDepths([8192, '4k', 0]), [0, 4096, 8192]);
+});
+
+/* ---------- summarizeByDepth ---------- */
+
+const depthRecords = [
+  { n_depth: 0, n_prompt: 512, n_gen: 0, avg_ns: 210e6, avg_ts: 2400 },
+  { n_depth: 0, n_prompt: 0, n_gen: 128, avg_ts: 75 },
+  { n_depth: 8192, n_prompt: 512, n_gen: 0, avg_ns: 260e6, avg_ts: 1900 },
+  { n_depth: 8192, n_prompt: 0, n_gen: 128, avg_ts: 68 },
+];
+
+test('summarizeByDepth：每个深度各一行，按深度升序', () => {
+  const { byDepth } = summarizeByDepth(depthRecords);
+  assert.deepEqual(byDepth.map((r) => r.depth), [0, 8192]);
+  assert.equal(byDepth[0].promptTps, 2400);
+  assert.equal(byDepth[0].genTps, 75);
+  assert.equal(Math.round(byDepth[0].ttftMs), 210);
+  assert.equal(byDepth[1].promptTps, 1900);
+  assert.equal(byDepth[1].genTps, 68);
+  // 深度越大分数应该越低（这里是构造数据）
+  assert.ok(byDepth[1].localScore < byDepth[0].localScore);
+});
+
+test('summarizeByDepth：summary 取第一个深度，兼容单深度老调用方', () => {
+  const { summary } = summarizeByDepth(depthRecords);
+  assert.equal(summary.promptTps, 2400);
+  assert.equal(summary.nPrompt, 512);
+  assert.equal(summary.nGen, 128);
+});
+
+test('summarizeByDepth：没有 n_depth 字段的老 engine 全归深度 0', () => {
+  const { byDepth } = summarizeByDepth([
+    { n_prompt: 512, n_gen: 0, avg_ts: 100 },
+    { n_prompt: 0, n_gen: 128, avg_ts: 20 },
+  ]);
+  assert.deepEqual(byDepth.map((r) => r.depth), [0]);
+  assert.equal(byDepth[0].promptTps, 100);
+});
+
+test('summarizeByDepth：空输入不炸，返回空 byDepth', () => {
+  const { byDepth, summary } = summarizeByDepth([]);
+  assert.deepEqual(byDepth, []);
+  assert.equal(summary.localScore, 0);
+});
+
+/* ---------- buildBenchArgs：深度 / 重复次数 ---------- */
+
+test('buildBenchArgs：多深度合并成一个 -d 向量参数', () => {
+  const a = buildBenchArgs({ modelPath: '/m', params: {}, bench: { depths: '0,4096,16384' } });
+  const i = a.indexOf('-d');
+  assert.ok(i >= 0);
+  assert.equal(a[i + 1], '0,4096,16384');
+});
+
+test('buildBenchArgs：只有深度 0 时不发 -d（引擎默认就是 0）', () => {
+  assert.ok(!buildBenchArgs({ modelPath: '/m', params: {}, bench: { depths: '0' } }).includes('-d'));
+  assert.ok(!buildBenchArgs({ modelPath: '/m', params: {}, bench: { depths: '' } }).includes('-d'));
+  assert.ok(!buildBenchArgs({ modelPath: '/m', params: {} }).includes('-d'));
+});
+
+test('buildBenchArgs：重复次数 → -r，并夹在 1..99', () => {
+  const a = buildBenchArgs({ modelPath: '/m', params: {}, bench: { reps: 3 } });
+  assert.equal(a[a.indexOf('-r') + 1], '3');
+  assert.equal(buildBenchArgs({ modelPath: '/m', params: {}, bench: { reps: 0 } }).indexOf('-r'), -1);
+  assert.equal(
+    buildBenchArgs({ modelPath: '/m', params: {}, bench: { reps: 1000 } })[
+      buildBenchArgs({ modelPath: '/m', params: {}, bench: { reps: 1000 } }).indexOf('-r') + 1
+    ],
+    '99'
+  );
+});
+
+test('buildBenchArgs：prompt / 生成长度可覆盖默认 512/128', () => {
+  const a = buildBenchArgs({ modelPath: '/m', params: {}, bench: { nPrompt: 1024, nGen: 256 } });
+  assert.equal(a[a.indexOf('-p') + 1], '1024');
+  assert.equal(a[a.indexOf('-n') + 1], '256');
+});
+
+/* ---------- fitDepths ---------- */
+
+test('fitDepths：按 ctxTrain - prompt - gen 封顶，超限的深度被跳过', () => {
+  const r = fitDepths('0,4096,300000', 262144);
+  assert.deepEqual(r.kept, [0, 4096]);
+  assert.deepEqual(r.skipped, [300000]);
+  assert.equal(r.limit, 262144 - 512 - 128);
+});
+
+test('fitDepths：不知道训练上下文时不限制', () => {
+  assert.deepEqual(fitDepths('0,131072', 0), { kept: [0, 131072], skipped: [], limit: null });
+  assert.deepEqual(fitDepths('0,131072', undefined).skipped, []);
+});
+
+test('fitDepths：上下文比 prompt+gen 还小时 limit 不为负（深度 0 仍保留）', () => {
+  const r = fitDepths('0,512', 600);
+  assert.deepEqual(r.kept, [0]);
+  assert.deepEqual(r.skipped, [512]);
+  assert.equal(r.limit, 0);
 });

@@ -27,6 +27,7 @@ llama.cpp 一键启动器（Electron 桌面应用）。
 | 内嵌聊天 | OpenAI 兼容 `/v1/chat/completions` 流式对话，支持 API Key、中止、多轮；推理模型的思考内容以 💭 斜体单独展示；**请求固定 `id_slot`**，使这段上下文留在该 slot 里可被存盘 |
 | 会话存盘 | `--slot-save-path` + `/slots/{id}?action=save\|restore\|erase`：把一段长会话（提示词缓存 + KV）整体存成磁盘文件，之后**秒级恢复、无需重新 prefill**。反复用同一份长文档（报告/代码库/合同）时最省时间；面板内可直接列出/恢复/删除存盘文件 |
 | 文件定位（右键） | **右键**模型卡片、卡片上的 👁/⚡ 附属标签、未配对文件标签或存盘文件 → 「在文件夹中显示（高亮文件）/ 打开所在文件夹 / 复制完整路径」；卡片右上角 `⋯` 是等价入口。核对"文件是不是齐了、路径对不对"时不用再去 Finder/资源管理器里翻目录 |
+| 基准测试 | 用 `llama-bench` 实测 prompt / 生成 TPS、TTFT 与 LocalScore；**可指定多个上下文深度（`-d 0,4096,16384`）和重复次数（`-r`）**，一次加载模型跑完所有深度，结果按深度逐行对比 —— 用来回答「这个模型开到 16K 上下文还剩多少速度」 |
 | 引擎自检 | 调用 `llama-fit-params` 做引擎侧交叉验证（信息性输出） |
 | 端口检测 | 启动前检测占用，自动建议空闲端口 |
 
@@ -114,7 +115,7 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **408 项全绿**，CI 在 Node 22/24 上跑）：
+`node:test` 单元测试（不依赖 Electron，当前 **423 项全绿**，CI 在 Node 22/24 上跑）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
 - `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
@@ -130,7 +131,7 @@ npm test
 - `test/sessions.test.js` — 会话存档 JSONL 读写与导出
 - `test/anthropic.test.js` — Anthropic Messages ↔ OpenAI Chat 适配层
 - `test/multimodal.test.js` — 图片 MIME 识别与多模态消息构造
-- `test/bench.test.js` — llama-bench JSON 解析与 TTFT/吞吐提取
+- `test/bench.test.js` — llama-bench JSON 解析与 TTFT/吞吐提取；上下文深度解析（`4k` 写法 / 去重排序）、超训练上下文裁剪（`fitDepths`）、多深度分组汇总、`-d`/`-r` 参数下发
 - `test/hf.test.js` — HuggingFace 模型列表与下载
 - `test/sandbox.test.js` — 子进程沙箱能力探测与启用判定
 - `test/hardware.test.js` — 跨平台硬件解析（nvidia-smi / 注册表显存 / WMI 溢出兜底 / lscpu / 多卡取最大）

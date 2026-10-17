@@ -1586,12 +1586,69 @@ function fmtTtft(v) {
   return v.toFixed(0);
 }
 
+/* ---------------- 基准测试设置：上下文深度 / 重复次数 ---------------- */
+
+/** 读深度输入框 → 去重升序的整数数组（支持 4k / 16k 写法） */
+function benchDepthList() {
+  const set = new Set();
+  String($('benchDepths')?.value || '')
+    .split(/[,，\s]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+    .forEach((s) => {
+      const m = s.match(/^(\d+)([km]?)$/);
+      if (!m) return;
+      const mult = m[2] === 'k' ? 1024 : m[2] === 'm' ? 1024 * 1024 : 1;
+      set.add(Number(m[1]) * mult);
+    });
+  return [...set].sort((a, b) => a - b);
+}
+
+function renderBenchChips() {
+  const on = new Set(benchDepthList());
+  document.querySelectorAll('#benchCtxChips button').forEach((b) => {
+    b.classList.toggle('on', on.has(Number(b.dataset.depth)));
+  });
+}
+
+function initBenchConfig() {
+  const chips = $('benchCtxChips');
+  if (!chips) return;
+  chips.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-depth]');
+    if (!btn) return;
+    const d = Number(btn.dataset.depth);
+    const set = new Set(benchDepthList());
+    if (set.has(d)) set.delete(d);
+    else set.add(d);
+    const list = [...set].sort((a, b) => a - b);
+    $('benchDepths').value = (list.length ? list : [0]).join(',');
+    renderBenchChips();
+    saveConfig();
+  });
+  $('benchDepths').addEventListener('input', () => {
+    renderBenchChips();
+    saveConfig();
+  });
+  $('benchReps').addEventListener('input', () => {
+    $('benchNoteReps').textContent = $('benchReps').value || '5';
+    saveConfig();
+  });
+  renderBenchChips();
+}
+
+/** 0 → "0"，4096 → "4K"，6000 → "6000" */
+function fmtDepth(d) {
+  const n = Number(d) || 0;
+  return n > 0 && n % 1024 === 0 ? `${n / 1024}K` : String(n);
+}
+
 async function runBench() {
   if (!state.model) return alert('请先选择模型');
-  const bin = await getBinaries();
-  if (!bin?.server) {
-    // 我们要的不是 llama-server，但要求 build 目录里至少有可解析的 layout
-    // 用同一个目录去探测 llama-bench
+  // 连点会让两个 llama-bench 同时抢 GPU，实测数字直接掉三成
+  if (state.benchRunning) {
+    toast('基准测试正在跑，等这一轮结束', 'bad');
+    return;
   }
   // 直接从 server 路径推断 bench 路径（同目录）
   const benchBin = await api.engine.binaries(state.config?.buildDir || '');
@@ -1603,42 +1660,91 @@ async function runBench() {
   const sep = benchBin.dir.includes('\\') ? '\\' : '/';
   const ext = benchBin.dir.includes('\\') ? '.exe' : '';
   const benchPath = `${benchBin.dir}${sep}llama-bench${ext}`;
+
+  const depths = benchDepthList();
+  const reps = Math.max(1, Math.min(99, Math.floor(Number($('benchReps').value)) || 5));
+  // 超训练上下文的深度不会报错，而是真的去分配超长 KV（卡数分钟），先按 ctxTrain - prompt - gen 挡掉
+  const ctxTrain = Number(state.model.ctxTrain) || 0;
+  const limit = ctxTrain > 0 ? Math.max(0, ctxTrain - 512 - 128) : null;
+  const kept = limit === null ? depths : depths.filter((d) => d <= limit);
+  const skipped = limit === null ? [] : depths.filter((d) => d > limit);
+  if (skipped.length) {
+    toast(`深度 ${skipped.map(fmtDepth).join(' / ')} 超过模型上下文（上限 ${fmtDepth(limit)}），已跳过`, 'bad');
+  }
+  if (depths.length && !kept.length) {
+    $('benchPanel').classList.remove('hidden');
+    benchStatus(`没有可跑的深度：均超过模型上下文（上限 ${fmtDepth(limit)}）`, 'bad');
+    return;
+  }
+
   $('benchPanel').classList.remove('hidden');
-  benchStatus('跑基准中…', 'running');
+  benchStatus(`跑基准中… ${(kept.length ? kept : [0]).map(fmtDepth).join(' / ')} × ${reps} 次`, 'running');
   $('benchBody').classList.add('hidden');
+  state.benchRunning = true;
+  $('btnBenchRun').disabled = true;
   try {
     const r = await api.bench.run({
       bin: benchPath,
       modelPath: state.model.path,
       params: state.params,
+      bench: { depths: kept, reps, ctxTrain },
     });
     if (!r.ok) {
       benchStatus(`失败: ${r.error || '未知错误'}`, 'bad');
       toast(`跑基准失败：${r.error || '未知错误'}`, 'bad');
       return;
     }
-    const s = r.summary;
+    const rows = Array.isArray(r.byDepth) ? r.byDepth : [];
+    const s = r.summary || {};
+    const multi = rows.length > 1;
+    const best = rows.length ? rows.reduce((a, b) => (b.localScore > a.localScore ? b : a), rows[0]) : null;
+
+    // 单一深度：沿用四个大数字；多深度：用表格逐行对比
+    const grid = $('benchGrid');
+    if (grid) grid.classList.toggle('hidden', multi);
     $('benchPromptTps').textContent = fmtTps(s.promptTps);
     $('benchGenTps').textContent = fmtTps(s.genTps);
     $('benchTtftMs').textContent = fmtTtft(s.ttftMs);
     $('benchLocalScore').textContent = s.localScore ? s.localScore.toFixed(0) : '—';
+
+    const tableWrap = $('benchTableWrap');
+    if (tableWrap) {
+      tableWrap.classList.toggle('hidden', !multi);
+      if (multi) {
+        $('benchTableBody').innerHTML = rows
+          .map((x) => `<tr><td>${fmtDepth(x.depth)}</td><td>${fmtTps(x.promptTps)}</td><td>${fmtTps(x.genTps)}</td><td>${fmtTtft(x.ttftMs)}</td><td><b>${x.localScore ? x.localScore.toFixed(0) : '—'}</b></td></tr>`)
+          .join('');
+      }
+    }
+
     const meta = [
       s.modelType ? `模型 ${s.modelType}` : null,
       s.modelSize ? `${(s.modelSize / 1e9).toFixed(2)} GB` : null,
       s.ngl !== null && s.ngl !== undefined ? `ngl=${s.ngl}` : null,
       s.typeK ? `KV=${s.typeK}/${s.typeV || ''}` : null,
       s.nThreads ? `threads=${s.nThreads}` : null,
+      `深度 ${(rows.length ? rows.map((x) => fmtDepth(x.depth)) : [0]).join(' / ')}`,
+      `重复 ${reps} 次`,
       s.nPrompt ? `prompt=${s.nPrompt}` : null,
       s.nGen ? `gen=${s.nGen}` : null,
     ].filter(Boolean).join(' · ');
     $('benchMeta').textContent = meta || '—';
     $('benchBody').classList.remove('hidden');
-    benchStatus(`✓ ${s.localScore.toFixed(0)} 分`, 'ok');
-    toast(`LocalScore ${s.localScore.toFixed(0)} · prompt ${fmtTps(s.promptTps)} TPS · gen ${fmtTps(s.genTps)} TPS`, 'ok');
+
+    if (multi && best) {
+      benchStatus(`✓ ${rows.length} 个深度 · 最佳 ${fmtDepth(best.depth)}：${best.localScore.toFixed(0)} 分`, 'ok');
+      toast(`基准完成：${rows.length} 个深度，最佳 ${fmtDepth(best.depth)} ${best.localScore.toFixed(0)} 分`, 'ok');
+    } else {
+      benchStatus(`✓ ${s.localScore.toFixed(0)} 分`, 'ok');
+      toast(`LocalScore ${s.localScore.toFixed(0)} · prompt ${fmtTps(s.promptTps)} TPS · gen ${fmtTps(s.genTps)} TPS`, 'ok');
+    }
     state.benchSummary = s;
   } catch (err) {
     benchStatus(`失败: ${err.message}`, 'bad');
     toast(`跑基准失败：${err.message}`, 'bad');
+  } finally {
+    state.benchRunning = false;
+    $('btnBenchRun').disabled = false;
   }
 }
 
@@ -1750,6 +1856,11 @@ function saveConfig() {
       modelPath: state.model?.path || '',
       params: state.params,
       apiStyle: apiStyle(),
+      // 基准设置也记住：同一台机器反复测同一批深度时不用每次重填
+      bench: {
+        depths: $('benchDepths')?.value || '0',
+        reps: Number($('benchReps')?.value) || 5,
+      },
     };
     api.config.save(state.config);
   }, 400);
@@ -1763,6 +1874,15 @@ async function loadConfig() {
   if (state.config.params) Object.assign(state.params, state.config.params);
   if (state.config.modelPath) {
     $('modelDir').value = state.config.modelDir;
+  }
+  if (state.config.bench) {
+    if (state.config.bench.depths !== undefined && $('benchDepths')) {
+      $('benchDepths').value = String(state.config.bench.depths);
+    }
+    if (state.config.bench.reps && $('benchReps')) {
+      $('benchReps').value = String(state.config.bench.reps);
+    }
+    if ($('benchNoteReps')) $('benchNoteReps').textContent = String(state.config.bench.reps || 5);
   }
   // 填充 API 风格下拉框（列表来自主进程，preload 不能 require shared/anthropic.js）
   const sel = $('apiStyle');
@@ -1847,7 +1967,12 @@ async function init() {
     saveConfig();
   };
   $('btnFitCheck').onclick = fitCheck;
-  $('btnBench').onclick = runBench;
+  $('btnBench').onclick = () => {
+    $('benchPanel').classList.remove('hidden');
+    $('benchDepths').focus();
+  };
+  $('btnBenchRun').onclick = runBench;
+  initBenchConfig();
   $('btnStart').onclick = start;
   $('btnStop').onclick = stop;
   $('btnCopyCmd').onclick = async () => {
