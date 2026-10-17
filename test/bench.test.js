@@ -21,6 +21,7 @@ const {
   summarizeByDepth,
   parseDepths,
   fitDepths,
+  mergeCompare,
   buildBenchArgs,
 } = require('../main/bench');
 
@@ -390,4 +391,33 @@ test('fitDepths：上下文比 prompt+gen 还小时 limit 不为负（深度 0 �
   assert.deepEqual(r.kept, [0]);
   assert.deepEqual(r.skipped, [512]);
   assert.equal(r.limit, 0);
+});
+
+/* ---------- mergeCompare（M5 tensor 对照） ---------- */
+
+test('mergeCompare：按深度对齐，算出 prompt / 生成加速比', () => {
+  const rows = mergeCompare(
+    [
+      { depth: 0, promptTps: 2310, genTps: 72.5 },
+      { depth: 4096, promptTps: 2200, genTps: 70 },
+    ],
+    [
+      { depth: 0, promptTps: 837, genTps: 72.6 },
+      { depth: 4096, promptTps: 800, genTps: 70.5 },
+    ]
+  );
+  assert.equal(rows.length, 2);
+  assert.ok(Math.abs(rows[0].promptSpeedup - 2.759) < 0.01);
+  assert.ok(Math.abs(rows[0].genSpeedup - 0.998) < 0.01);
+  assert.ok(Math.abs(rows[1].promptSpeedup - 2.75) < 0.01);
+});
+
+test('mergeCompare：对照缺失该深度 / 数值为 0 时给 null（表格显示 —）', () => {
+  const rows = mergeCompare(
+    [{ depth: 0, promptTps: 100, genTps: 10 }, { depth: 8192, promptTps: 90, genTps: 9 }],
+    [{ depth: 0, promptTps: 0, genTps: 10 }]
+  );
+  assert.equal(rows[0].promptSpeedup, null);
+  assert.equal(rows[1].promptSpeedup, null);
+  assert.equal(rows[0].genSpeedup, 1);
 });

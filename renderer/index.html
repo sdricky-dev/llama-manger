@@ -93,6 +93,10 @@
             <input id="benchReps" type="number" min="1" max="99" step="1" value="5"
                    title="llama-bench -r：每个测试重复几次后取平均" />
           </label>
+          <label class="adv-label hidden" id="benchCompareWrap"
+                 title="再跑一遍关闭 Metal tensor API 的对照，量化 M5 神经加速器的 prefill 收益（耗时翻倍）">
+            <input type="checkbox" id="benchCompareTensor" /> M5 加速对照
+          </label>
           <button id="btnBenchRun" class="btn primary">▶ 开始测试</button>
         </div>
 
@@ -106,9 +110,7 @@
           <div id="benchMeta" class="bench-meta">—</div>
           <div id="benchTableWrap" class="bench-table-wrap hidden">
             <table class="bench-table">
-              <thead>
-                <tr><th>上下文深度</th><th>Prompt t/s</th><th>生成 t/s</th><th>首 token (ms)</th><th>LocalScore</th></tr>
-              </thead>
+              <thead id="benchTableHead"></thead>
               <tbody id="benchTableBody"></tbody>
             </table>
           </div>
@@ -159,6 +161,7 @@
           <button id="btnStart" class="btn primary">▶ 启动</button>
           <button id="btnStop" class="btn danger" disabled>■ 停止</button>
           <span id="engineState" class="engine-state"></span>
+          <span id="engineMetal" class="engine-metal hidden"></span>
           <a id="serverUrl" class="url hidden" target="_blank" rel="noopener"></a>
         </div>
       </div>

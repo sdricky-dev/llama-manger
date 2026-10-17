@@ -177,6 +177,8 @@ function scheduleUpdate() {
 async function scanHw() {
   $('hwCard').innerHTML = '<div class="hw-loading">检测硬件中…</div>';
   state.hw = await api.hw.scan();
+  // M5 加速对照只在 macOS 上有意义（其它平台没有 Metal tensor API）
+  $('benchCompareWrap')?.classList.toggle('hidden', state.hw?.platform !== 'darwin');
   const h = state.hw;
   const gpuName = h.gpu ? h.gpu.name : '—';
   const gpuExtra = h.gpu?.cores ? ` · ${h.gpu.cores} 核` : '';
@@ -879,6 +881,26 @@ function setEngineState(state_, extra) {
   }[state_] || state_;
   $('btnStop').disabled = !['starting', 'running', 'stopping'].includes(state_);
   if (state_ !== 'running' && state_ !== 'starting') state.serverUrl = null;
+}
+
+function refreshMetalBadge() {
+  api.engine.caps(state.config?.buildDir || '').then(renderMetalBadge).catch(() => {});
+}
+
+/** Metal 能力徽标：M5 神经加速器（Metal 4 tensor API）是否启用 —— 关掉时 prefill 会慢约 2.8× */
+function renderMetalBadge(info) {
+  const el = $('engineMetal');
+  if (!el) return;
+  const v = info && info.verdict;
+  if (!v || v.level === 'none') {
+    el.className = 'engine-metal hidden';
+    el.textContent = '';
+    el.title = '';
+    return;
+  }
+  el.className = `engine-metal ${v.level}`;
+  el.textContent = v.text || '';
+  el.title = v.title || '';
 }
 
 /* ---------------- 聊天 ---------------- */
@@ -1637,6 +1659,11 @@ function initBenchConfig() {
   renderBenchChips();
 }
 
+/** tensor 加速比：2.7598 → "2.76×" */
+function fmtSpeedup(v) {
+  return Number.isFinite(v) ? `${v.toFixed(2)}×` : '—';
+}
+
 /** 0 → "0"，4096 → "4K"，6000 → "6000" */
 function fmtDepth(d) {
   const n = Number(d) || 0;
@@ -1663,6 +1690,8 @@ async function runBench() {
 
   const depths = benchDepthList();
   const reps = Math.max(1, Math.min(99, Math.floor(Number($('benchReps').value)) || 5));
+  // M5 加速对照：只有 macOS 才有意义（跑两遍，耗时翻倍）
+  const compareTensor = !!($('benchCompareTensor')?.checked && state.hw?.platform === 'darwin');
   // 超训练上下文的深度不会报错，而是真的去分配超长 KV（卡数分钟），先按 ctxTrain - prompt - gen 挡掉
   const ctxTrain = Number(state.model.ctxTrain) || 0;
   const limit = ctxTrain > 0 ? Math.max(0, ctxTrain - 512 - 128) : null;
@@ -1678,7 +1707,10 @@ async function runBench() {
   }
 
   $('benchPanel').classList.remove('hidden');
-  benchStatus(`跑基准中… ${(kept.length ? kept : [0]).map(fmtDepth).join(' / ')} × ${reps} 次`, 'running');
+  benchStatus(
+    `跑基准中… ${(kept.length ? kept : [0]).map(fmtDepth).join(' / ')} × ${reps} 次${compareTensor ? '（含 tensor 对照，跑两遍）' : ''}`,
+    'running'
+  );
   $('benchBody').classList.add('hidden');
   state.benchRunning = true;
   $('btnBenchRun').disabled = true;
@@ -1687,7 +1719,7 @@ async function runBench() {
       bin: benchPath,
       modelPath: state.model.path,
       params: state.params,
-      bench: { depths: kept, reps, ctxTrain },
+      bench: { depths: kept, reps, ctxTrain, compareTensor },
     });
     if (!r.ok) {
       benchStatus(`失败: ${r.error || '未知错误'}`, 'bad');
@@ -1696,7 +1728,8 @@ async function runBench() {
     }
     const rows = Array.isArray(r.byDepth) ? r.byDepth : [];
     const s = r.summary || {};
-    const multi = rows.length > 1;
+    const hasCompare = rows.some((x) => Number.isFinite(x.promptSpeedup));
+    const multi = rows.length > 1 || hasCompare;
     const best = rows.length ? rows.reduce((a, b) => (b.localScore > a.localScore ? b : a), rows[0]) : null;
 
     // 单一深度：沿用四个大数字；多深度：用表格逐行对比
@@ -1711,8 +1744,21 @@ async function runBench() {
     if (tableWrap) {
       tableWrap.classList.toggle('hidden', !multi);
       if (multi) {
+        const cols = ['上下文深度', 'Prompt t/s', '生成 t/s', '首 token (ms)', 'LocalScore'];
+        if (hasCompare) cols.push('tensor 加速');
+        $('benchTableHead').innerHTML = `<tr>${cols.map((c) => `<th>${c}</th>`).join('')}</tr>`;
         $('benchTableBody').innerHTML = rows
-          .map((x) => `<tr><td>${fmtDepth(x.depth)}</td><td>${fmtTps(x.promptTps)}</td><td>${fmtTps(x.genTps)}</td><td>${fmtTtft(x.ttftMs)}</td><td><b>${x.localScore ? x.localScore.toFixed(0) : '—'}</b></td></tr>`)
+          .map((x) => {
+            const cells = [
+              fmtDepth(x.depth),
+              fmtTps(x.promptTps),
+              fmtTps(x.genTps),
+              fmtTtft(x.ttftMs),
+              `<b>${x.localScore ? x.localScore.toFixed(0) : '—'}</b>`,
+            ];
+            if (hasCompare) cells.push(fmtSpeedup(x.promptSpeedup));
+            return `<tr>${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`;
+          })
           .join('');
       }
     }
@@ -1725,15 +1771,18 @@ async function runBench() {
       s.nThreads ? `threads=${s.nThreads}` : null,
       `深度 ${(rows.length ? rows.map((x) => fmtDepth(x.depth)) : [0]).join(' / ')}`,
       `重复 ${reps} 次`,
+      hasCompare ? '对照：tensor 开/关' : null,
       s.nPrompt ? `prompt=${s.nPrompt}` : null,
       s.nGen ? `gen=${s.nGen}` : null,
     ].filter(Boolean).join(' · ');
     $('benchMeta').textContent = meta || '—';
     $('benchBody').classList.remove('hidden');
 
-    if (multi && best) {
-      benchStatus(`✓ ${rows.length} 个深度 · 最佳 ${fmtDepth(best.depth)}：${best.localScore.toFixed(0)} 分`, 'ok');
-      toast(`基准完成：${rows.length} 个深度，最佳 ${fmtDepth(best.depth)} ${best.localScore.toFixed(0)} 分`, 'ok');
+    const speedTxt = hasCompare && rows.length === 1 ? ` · tensor ${fmtSpeedup(rows[0].promptSpeedup)}` : '';
+    if (rows.length > 1 || hasCompare) {
+      const head = best || rows[0];
+      benchStatus(`✓ ${rows.length} 个深度 · 最佳 ${fmtDepth(head.depth)}：${head.localScore.toFixed(0)} 分${speedTxt}`, 'ok');
+      toast(`基准完成：${rows.length} 个深度，最佳 ${fmtDepth(head.depth)} ${head.localScore.toFixed(0)} 分${speedTxt}`, 'ok');
     } else {
       benchStatus(`✓ ${s.localScore.toFixed(0)} 分`, 'ok');
       toast(`LocalScore ${s.localScore.toFixed(0)} · prompt ${fmtTps(s.promptTps)} TPS · gen ${fmtTps(s.genTps)} TPS`, 'ok');
@@ -1908,8 +1957,12 @@ function setMode(mode) {
 /* ---------------- 引擎事件 ---------------- */
 function bindEngineEvents() {
   api.engine.on('engine:log', (text) => log(text));
+  api.engine.on('engine:capability', renderMetalBadge);
+  // 渲染层可能晚于引擎启动（例如刷新页面），补一次当前状态（内部会跑零模型探针）
+  refreshMetalBadge();
   api.engine.on('engine:state', (s) => {
     setEngineState(s.state);
+    if (s.state === 'running') refreshMetalBadge();
     if (s.url) {
       state.serverUrl = s.url;
       const a = $('serverUrl');
@@ -1939,6 +1992,8 @@ async function init() {
   bindEngineEvents();
 
   await loadConfig();
+  // 设置里的 buildDir 此时才可用，重新探一次 Metal 能力（换了引擎目录也能跟上）
+  refreshMetalBadge();
   await scanHw();
   if ($('modelDir').value) await scanModels();
 

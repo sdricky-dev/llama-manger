@@ -69,5 +69,7 @@ node e2e/cdp-eval.js e2e/step7-stop.js         # 停止
 | `step21-mac-server.js` | macOS 统一内存路径回归（启动服务 → 对话 → 优雅退出） |
 | `step22-ctxmenu.js` | 右键菜单：在文件夹中显示 / 打开所在文件夹 / 复制路径 / 异常分支 |
 | `step23-bench-ctx.js` | 多上下文基准：深度 0/4K + 重复 1 次，断言表格逐行输出（前置 step2、step3） |
+| `step24-engine-caps.js` | Metal 能力徽标：M5 上应显示「神经加速器 ✓」（设 `GGML_METAL_TENSOR_DISABLE=1` 启动时应变红） |
+| `step25-bench-compare.js` | M5 加速对照：勾选后跑两遍，断言多出「tensor 加速」列且倍率 > 1（前置 step2、step3） |
 
 脚本只是断言工具，**没有** `expect` 框架：`cdp-eval.js` 会把脚本返回值（JSON）打印出来，人工或 CI 比对关键字段。

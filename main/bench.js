@@ -324,18 +324,12 @@ function buildBenchArgs({ modelPath, params = {}, bench = {} }) {
  * @param {{onLog?:Function}} [cb]
  * @returns {Promise<{ok:boolean, summary:object, byDepth:object[], rawStdout:string, error?:string}>}
  */
-function runBench({ bin, modelPath, params, bench = {}, timeoutMs }, cb = {}) {
+/**
+ * 跑一遍 llama-bench（单次 spawn），只负责「把进程跑完 + 收集 stdout」。
+ * @returns {Promise<{ok:boolean, stdout:string, error?:string}>}
+ */
+function spawnBench({ bin, args, env, timeoutMs, onLog }) {
   return new Promise((resolve) => {
-    // 深度上限的兜底：渲染层已经按模型上下文裁过，这里再挡一次（界面逻辑改动不会让引擎跑飞）
-    const fit = fitDepths(bench.depths, bench.ctxTrain, bench.nPrompt || 512, bench.nGen || 128);
-    const args = buildBenchArgs({ modelPath, params, bench: { ...bench, depths: fit.kept } });
-    const depths = fit.kept;
-    const nDepths = Math.max(1, depths.length);
-    const reps = Math.max(1, Math.min(99, Math.floor(Number(bench.reps)) || 5));
-    // 超时按「深度数 × 重复次数」放大：深上下文每次都要重新预填 KV，比 depth 0 慢得多
-    const limitMs = Number(timeoutMs) > 0
-      ? Number(timeoutMs)
-      : Math.min(30 * 60 * 1000, 120000 + 12000 * nDepths * reps);
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -347,51 +341,130 @@ function runBench({ bin, modelPath, params, bench = {}, timeoutMs }, cb = {}) {
 
     let p;
     try {
-      p = spawn(bin, args, {
-        env: { ...process.env },
-        cwd: process.cwd(),
-      });
+      p = spawn(bin, args, { env: env || { ...process.env }, cwd: process.cwd() });
     } catch (err) {
-      done({ ok: false, summary: null, byDepth: [], rawStdout: '', error: `启动失败: ${err.message}` });
+      done({ ok: false, stdout: '', error: `启动失败: ${err.message}` });
       return;
     }
 
-    if (cb.onLog) cb.onLog(`$ llama-bench ${args.join(' ')}\n`);
+    if (onLog) onLog(`$ llama-bench ${args.join(' ')}\n`);
 
     const timer = setTimeout(() => {
       try { p.kill('SIGKILL'); } catch {}
-      done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: `超时（${Math.round(limitMs / 1000)}s）` });
-    }, limitMs);
+      done({ ok: false, stdout, error: `超时（${Math.round(timeoutMs / 1000)}s）` });
+    }, timeoutMs);
 
     p.stdout.on('data', (d) => {
       const t = d.toString();
       stdout += t;
-      if (cb.onLog) cb.onLog(t);
+      if (onLog) onLog(t);
     });
     p.stderr.on('data', (d) => {
       const t = d.toString();
       stderr += t;
-      if (cb.onLog) cb.onLog(t);
+      if (onLog) onLog(t);
     });
     p.on('error', (err) => {
       clearTimeout(timer);
-      done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: `启动失败: ${err.message}` });
+      done({ ok: false, stdout, error: `启动失败: ${err.message}` });
     });
     p.on('exit', (code) => {
       clearTimeout(timer);
       if (code !== 0 && !stdout) {
-        done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: `exit=${code} stderr=${stderr.slice(-500)}` });
+        done({ ok: false, stdout, error: `exit=${code} stderr=${stderr.slice(-500)}` });
         return;
       }
-      try {
-        const records = parseBenchJson(stdout);
-        const { summary, byDepth } = summarizeByDepth(records);
-        done({ ok: true, summary, byDepth, skippedDepths: fit.skipped, rawStdout: stdout });
-      } catch (err) {
-        done({ ok: false, summary: null, byDepth: [], rawStdout: stdout, error: err.message });
-      }
+      done({ ok: true, stdout });
     });
   });
+}
+
+/**
+ * 把「关闭 tensor API」那一轮的 prompt/生成吞吐并到主结果里，算出加速比。
+ * 生成阶段基本不受 tensor API 影响（访存受限），所以 genSpeedup 通常 ≈1，
+ * 留着是为了让异常一眼可见（比如某些量化会走不同内核）。
+ *
+ * @param {object[]} rows 主结果（tensor 开启）
+ * @param {object[]} compareRows 对照结果（tensor 关闭）
+ */
+function mergeCompare(rows, compareRows) {
+  const byDepth = new Map((compareRows || []).map((r) => [r.depth, r]));
+  return (rows || []).map((r) => {
+    const base = byDepth.get(r.depth);
+    const ratio = (a, b) => (a > 0 && b > 0 ? a / b : null);
+    return {
+      ...r,
+      promptSpeedup: ratio(Number(r.promptTps), Number(base && base.promptTps)),
+      genSpeedup: ratio(Number(r.genTps), Number(base && base.genTps)),
+    };
+  });
+}
+
+/**
+ * 跑一次基准测试。
+ *
+ * @param {{bin:string, modelPath:string, params:object, bench?:object, timeoutMs?:number}} o
+ *   bench: { depths, reps, nPrompt, nGen, ctxTrain, compareTensor }
+ *   compareTensor=true 时会再跑一遍（GGML_METAL_TENSOR_DISABLE=1），用于量化 M5 神经加速器收益
+ * @param {{onLog?:Function}} [cb]
+ * @returns {Promise<{ok:boolean, summary:object, byDepth:object[], compare:object[]|null, skippedDepths:number[], rawStdout:string, error?:string}>}
+ */
+async function runBench({ bin, modelPath, params, bench = {}, timeoutMs }, cb = {}) {
+  // 深度上限的兜底：渲染层已经按模型上下文裁过，这里再挡一次（界面逻辑改动不会让引擎跑飞）
+  const fit = fitDepths(bench.depths, bench.ctxTrain, bench.nPrompt || 512, bench.nGen || 128);
+  const args = buildBenchArgs({ modelPath, params, bench: { ...bench, depths: fit.kept } });
+  const nDepths = Math.max(1, fit.kept.length);
+  const reps = Math.max(1, Math.min(99, Math.floor(Number(bench.reps)) || 5));
+  // 超时按「深度数 × 重复次数」放大：深上下文每次都要重新预填 KV，比 depth 0 慢得多
+  const limitMs = Number(timeoutMs) > 0
+    ? Number(timeoutMs)
+    : Math.min(30 * 60 * 1000, 120000 + 12000 * nDepths * reps);
+
+  const fail = (error, stdout = '') => ({
+    ok: false, summary: null, byDepth: [], compare: null, skippedDepths: fit.skipped, rawStdout: stdout, error,
+  });
+
+  const first = await spawnBench({ bin, args, timeoutMs: limitMs, onLog: cb.onLog });
+  if (!first.ok) return fail(first.error, first.stdout);
+
+  let parsed;
+  try {
+    parsed = summarizeByDepth(parseBenchJson(first.stdout));
+  } catch (err) {
+    return fail(err.message, first.stdout);
+  }
+
+  // 可选对照：关掉 Metal tensor API 再跑一遍，量化 M5 神经加速器的收益
+  let compareRows = null;
+  if (bench.compareTensor) {
+    if (cb.onLog) cb.onLog('\n[对照] 关闭 Metal tensor API 再跑一遍（GGML_METAL_TENSOR_DISABLE=1）…\n');
+    const second = await spawnBench({
+      bin,
+      args,
+      env: { ...process.env, GGML_METAL_TENSOR_DISABLE: '1' },
+      timeoutMs: limitMs,
+      onLog: cb.onLog,
+    });
+    if (second.ok) {
+      try {
+        compareRows = summarizeByDepth(parseBenchJson(second.stdout)).byDepth;
+      } catch {
+        compareRows = null;
+      }
+    } else if (cb.onLog) {
+      cb.onLog(`[对照] 跳过：${second.error}\n`);
+    }
+  }
+
+  const byDepth = compareRows ? mergeCompare(parsed.byDepth, compareRows) : parsed.byDepth;
+  return {
+    ok: true,
+    summary: parsed.summary,
+    byDepth,
+    compare: compareRows,
+    skippedDepths: fit.skipped,
+    rawStdout: first.stdout,
+  };
 }
 
 module.exports = {
@@ -403,5 +476,6 @@ module.exports = {
   summarizeBench,
   summarizeByDepth,
   buildBenchArgs,
+  mergeCompare,
   runBench,
 };

@@ -417,6 +417,19 @@ input[type="check"] { width: 17px; height: 17px; accent-color: var(--accent); cu
 .engine-state.running { color: var(--ok); }
 .engine-state.starting { color: var(--warn); }
 .engine-state.error { color: var(--err); }
+
+/* Metal 能力徽标（M5 神经加速器是否启用） */
+.engine-metal {
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: help;
+  white-space: nowrap;
+}
+.engine-metal.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.engine-metal.bad { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, var(--border)); }
 .url { font-family: ui-monospace, monospace; font-size: 12px; }
 .cmd-box {
   background: var(--bg);

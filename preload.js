@@ -51,6 +51,7 @@ contextBridge.exposeInMainWorld('lm', {
     portStatus: (port) => ipcRenderer.invoke('engine:port-status', port),
     findFreePort: (start) => ipcRenderer.invoke('engine:find-free-port', start),
     fit: (o) => ipcRenderer.invoke('engine:fit', o),
+    caps: (buildDir) => ipcRenderer.invoke('engine:caps', buildDir),
     on: on,
   },
   bench: {

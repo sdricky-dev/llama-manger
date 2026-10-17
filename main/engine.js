@@ -11,9 +11,14 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const sandbox = require('./sandbox');
+const engineCaps = require('../shared/engine-caps');
 
 let proc = null;
 let readySent = false;
+// Metal 能力哨兵：从启动日志里抓 has tensor / GPU name（M5 神经加速器是否启用）
+let caps = {};
+let capsBuf = '';
+let capsDir = ''; // 探针结果对应的 build 目录（换目录要重新探）
 
 function setState(state, extra) {
   // 由 main.js 注入的回调
@@ -36,6 +41,8 @@ function startServer(o) {
   const { bin, args, cwd, modelPath, slotSavePath, allowLanOut } = o;
   if (isRunning()) throw new Error('服务已在运行');
   readySent = false;
+  caps = {};
+  capsBuf = '';
 
   // 沙箱包装（可选）：仅在用户开启且平台支持时生效
   let cmd = bin;
@@ -73,6 +80,18 @@ function startServer(o) {
   const onData = (d) => {
     const text = d.toString();
     send('engine:log', text);
+
+    // 只累积到拿到 has tensor 为止；跑久了日志可能是几百 MB
+    if (caps.hasTensor === undefined && capsBuf.length < 262144) {
+      capsBuf += text;
+      const found = engineCaps.parseEngineCaps(capsBuf);
+      if (found) {
+        const changed = Object.keys(found).some((k) => caps[k] !== found[k]);
+        caps = { ...caps, ...found };
+        if (changed) send('engine:capability', capsReport());
+      }
+    }
+
     if (!readySent) {
       buf += text;
       const m = buf.match(/listening on\s+(\S+)/);
@@ -96,6 +115,88 @@ function startServer(o) {
     proc = null;
   });
   return { pid: proc.pid };
+}
+
+/**
+ * 当前进程解析到的 Metal 能力（渲染层晚于启动时用它补一次）。
+ * @returns {{gpuName?:string, hasTensor?:boolean, hasBfloat?:boolean, embeddedMetal?:boolean}}
+ */
+/** 能力 + 给界面的判定（白名单逻辑在 shared/engine-caps.js，主进程算好再给渲染层） */
+function capsReport() {
+  return {
+    caps: { ...caps },
+    verdict: engineCaps.metalVerdict({
+      platform: process.platform,
+      chip: (os.cpus()[0] || {}).model || '',
+      caps,
+    }),
+  };
+}
+
+function getCaps() {
+  return capsReport();
+}
+
+/**
+ * 用 llama-bench 做一次「零模型」探针，拿到 Metal 能力。
+ *
+ * 为什么不能用服务端日志：llama-server / llama-cli 的设备信息是在日志回调装好之前
+ * 初始化的，那几行会被吞掉（实测 -v 也没有）；而 llama-bench 会在加载模型**之前**
+ * 打印全部 device props。给一个不存在的模型路径，它会先打印能力再报错退出，
+ * 全程约 0.2 秒、不占内存。
+ *
+ * 继承当前环境变量是**有意为之**：用户若设了 GGML_METAL_TENSOR_DISABLE，
+ * 探针应当和真正启动的引擎表现一致。
+ *
+ * @param {string} [buildDir]
+ * @returns {Promise<{caps:object, verdict:object}>}
+ */
+function probeCapabilities(buildDir) {
+  const dir = buildDir || '';
+  if (caps.hasTensor !== undefined && capsDir === dir) return Promise.resolve(capsReport());
+  if (capsDir !== dir) {
+    caps = {};
+    capsBuf = '';
+    capsDir = dir;
+  }
+
+  const bins = findBinaries(buildDir);
+  if (!bins) return Promise.resolve(capsReport());
+  const bench = path.join(bins.dir, process.platform === 'win32' ? 'llama-bench.exe' : 'llama-bench');
+  if (!fs.existsSync(bench)) return Promise.resolve(capsReport());
+
+  return new Promise((resolve) => {
+    let out = '';
+    let done = false;
+    let timer = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      const found = engineCaps.parseEngineCaps(out);
+      if (found) {
+        const changed = Object.keys(found).some((k) => caps[k] !== found[k]);
+        caps = { ...caps, ...found };
+        if (changed) send('engine:capability', capsReport());
+      }
+      resolve(capsReport());
+    };
+
+    let p;
+    try {
+      p = spawn(bench, ['-m', path.join(os.tmpdir(), '__lm_caps_probe__.gguf'), '-p', '8', '-n', '1'], {
+        env: { ...process.env },
+      });
+    } catch {
+      resolve(capsReport());
+      return;
+    }
+    timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, 8000);
+    p.stdout.on('data', (d) => (out += d.toString()));
+    p.stderr.on('data', (d) => (out += d.toString()));
+    p.on('error', finish);
+    p.on('exit', finish);
+  });
 }
 
 function stopServer() {
@@ -309,6 +410,8 @@ function findBinaries(buildDir) {
 }
 
 module.exports = {
+  getCaps,
+  probeCapabilities,
   startServer,
   stopServer,
   isRunning,

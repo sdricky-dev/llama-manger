@@ -134,6 +134,8 @@ app.whenReady().then(() => {
   ipcMain.handle('engine:port-status', (_e, port) => engine.portInUse(port));
   ipcMain.handle('engine:find-free-port', (_e, start) => engine.findFreePort(start));
   ipcMain.handle('engine:fit', (_e, o) => engine.runFit(o));
+  // Metal 能力哨兵：渲染层晚于引擎启动时补一次（平时靠 engine:capability 事件推送）
+  ipcMain.handle('engine:caps', async (_e, buildDir) => engine.probeCapabilities(buildDir));
 
   // ---------- 基准测试（仿 LocalScore） ----------
   // 日志通过 onLog 经由引擎日志通道流回渲染层，spawn 一完成就把 summary 回传
