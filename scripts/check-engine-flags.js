@@ -26,8 +26,10 @@ const {
   extractEmittedFlags,
   extractSupportedFlags,
   extractDeclaredFlagsFromSource,
+  extractDecisionTypes,
   diffFlags,
 } = require('../shared/engine-flags');
+const { DECISION_TYPES } = require('../main/gguf');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -56,9 +58,44 @@ function report(groups) {
   console.log('');
   if (failed) {
     console.log('参数漂移检查未通过。');
-    process.exit(1);
+    return false;
   }
   console.log('参数漂移检查通过。');
+  return true;
+}
+
+/**
+ * decision（判决/打分）模型类型漂移：上游 COMMON_DECISION_TYPE_NAMES ↔ main/gguf.js DECISION_TYPES。
+ *
+ * 名单落后 → 界面把引擎明明支持的模型标成「引擎不支持」（误报）；
+ * 名单多出 → 界面显示可用，但引擎加载即失败（漏报，更危险）。
+ */
+function checkDecisionTypes(commonCppPath) {
+  if (!fs.existsSync(commonCppPath)) {
+    console.log(`⚠️  没有 ${commonCppPath}，跳过 decision 类型检查`);
+    return true;
+  }
+  const upstream = extractDecisionTypes(fs.readFileSync(commonCppPath, 'utf8'));
+  if (upstream.size === 0) {
+    console.log('⚠️  未能从 common.cpp 解析出 COMMON_DECISION_TYPE_NAMES，跳过 decision 类型检查');
+    return true;
+  }
+  const ours = new Set(DECISION_TYPES);
+  const missing = [...upstream].filter((t) => !ours.has(t)).sort();
+  const stale = [...ours].filter((t) => !upstream.has(t)).sort();
+  if (!missing.length && !stale.length) {
+    console.log(`✅ main/gguf.js DECISION_TYPES：${upstream.size} 个类型与上游一致`);
+    return true;
+  }
+  if (missing.length) {
+    console.log(`❌ DECISION_TYPES 缺少上游类型：${missing.join(', ')}`);
+    console.log('   → main/gguf.js 的界面提示会把这些模型误标为「引擎不支持」');
+  }
+  if (stale.length) {
+    console.log(`❌ DECISION_TYPES 含上游已没有的类型：${stale.join(', ')}`);
+    console.log('   → 界面会显示可用，但引擎加载即失败（unsupported decision model type）');
+  }
+  return false;
 }
 
 /* ---------- 模式 1：读引擎 --help ---------- */
@@ -118,10 +155,13 @@ function runHelpMode(buildDirArg) {
   const cliOrServer = new Set([...supported.get('llama-cli'), ...supported.get('llama-server')]);
 
   console.log('');
-  report([
+  const flagsOk = report([
     { name: 'shared/args.js（启动参数）', source: 'shared/args.js', supported: cliOrServer },
     { name: 'main/bench.js（基准测试参数）', source: 'main/bench.js', supported: supported.get('llama-bench') },
   ]);
+  // 本地源码通常就在 build 目录旁边，能查就一并查了
+  const decisionOk = checkDecisionTypes(path.join(buildDir, '..', 'common', 'common.cpp'));
+  if (!flagsOk || !decisionOk) process.exit(1);
 }
 
 /* ---------- 模式 2：读上游源码（CI 用，无需编译） ---------- */
@@ -137,7 +177,9 @@ function runSourceMode(sourcePath) {
   console.log('    注意：源码模式只覆盖 shared/args.js；llama-bench 自己的参数不在此文件内，');
   console.log('          完整检查请在有编译产物的机器上跑帮助模式。');
   console.log('');
-  report([{ name: 'shared/args.js（启动参数）', source: 'shared/args.js', supported: declared }]);
+  const flagsOk = report([{ name: 'shared/args.js（启动参数）', source: 'shared/args.js', supported: declared }]);
+  const decisionOk = checkDecisionTypes(path.join(path.dirname(sourcePath), 'common.cpp'));
+  if (!flagsOk || !decisionOk) process.exit(1);
 }
 
 /* ---------- 入口 ---------- */

@@ -52,6 +52,33 @@ test('extractModelInfo MoE 字段', () => {
   assert.equal(info.expertShared, 0);
 });
 
+test('extractModelInfo 识别 decision 类型（含上游新增项）', () => {
+  // 上游 common/common.cpp: COMMON_DECISION_TYPE_NAMES 新增 granite-switch / vllm-decision2 / vllm-d3
+  const cases = [
+    ['openjev', true],
+    ['vllm-decision2', true],
+    ['vllm-d3', true],
+    ['granite-switch', true],
+    ['some-future-type', false],
+  ];
+  for (const [type, expected] of cases) {
+    const f = buildGguf(
+      {
+        arch: 'granite',
+        extraKv: {
+          'granite.decision.type': { value: type, type: 8 },
+          'tokenizer.chat_template.systemone': { value: 'sys-template', type: 8 },
+        },
+      },
+      path.join(tmp, `decision-${type}.gguf`)
+    );
+    const info = extractModelInfo(parseGguf(f), f, null);
+    assert.equal(info.decisionType, type);
+    assert.equal(info.decisionSupported, expected, `${type} 的支持性判断`);
+    assert.equal(info.decisionTemplate, true);
+  }
+});
+
 test('parseModelFile 组合 + nameOverride', () => {
   const f = buildGguf({ arch: 'llama', nLayer: 10 }, path.join(tmp, 'my-model.gguf'));
   const info = parseModelFile(f, 'override-name');

@@ -9,7 +9,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { extractEmittedFlags, extractSupportedFlags, extractDeclaredFlagsFromSource, stripCppComments, diffFlags } = require('../shared/engine-flags');
+const {
+  extractEmittedFlags,
+  extractSupportedFlags,
+  extractDeclaredFlagsFromSource,
+  extractDecisionTypes,
+  stripCppComments,
+  diffFlags,
+} = require('../shared/engine-flags');
 
 /* ---------- extractEmittedFlags ---------- */
 
@@ -182,4 +189,22 @@ test('diffFlags：报出引擎不认识的 flag（排序）', () => {
 test('diffFlags：接受数组输入', () => {
   const r = diffFlags(['-c'], ['-m', '-o']);
   assert.deepEqual(r.missing, ['-c']);
+});
+
+/* ---------- extractDecisionTypes ---------- */
+
+test('extractDecisionTypes：解析映射，且不吃映射末尾的注释', () => {
+  const src = `
+    static const std::map<common_decision_type, std::string> COMMON_DECISION_TYPE_NAMES = {
+        { COMMON_DECISION_TYPE_OPENJEV,        "openjev"       },
+        { COMMON_DECISION_TYPE_GRANITE_SWITCH, "granite-switch"},
+        // for future models, ALWAYS add org name prefix, e.g. "orgname-modelname"
+    };
+    static const char * other = "not-a-type";
+  `;
+  assert.deepEqual([...extractDecisionTypes(src)], ['openjev', 'granite-switch']);
+});
+
+test('extractDecisionTypes：找不到映射时返回空集合（调用方按跳过处理）', () => {
+  assert.equal(extractDecisionTypes('int main() { return 0; }').size, 0);
 });

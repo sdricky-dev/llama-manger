@@ -45,8 +45,8 @@ node e2e/cdp-eval.js e2e/step6-chat.js         # 流式对话
 node e2e/cdp-eval.js e2e/step7-stop.js         # 停止
 ```
 
-最近一次实测（Electron 44 / 引擎 build 11698 / Qwen3.5-9B Q5_K_M）：
-扫描 4 个模型 · 一键配置占用 18.71 GB · server「运行中」· 存盘 70ms / 恢复 24ms · 对话 2s · 停止「未运行」。
+最近一次实测（Electron 44 / 引擎 build 11706 `f74e2fa6a` / Qwen3.5-9B Q5_K_M）：
+扫描 4 个模型 · 一键配置占用 18.71 GB · server「运行中」· 存盘 71ms / 恢复 21ms · 对话 3s · 停止「未运行」。
 
 两个额外的手工检查（脚本覆盖不到）：
 

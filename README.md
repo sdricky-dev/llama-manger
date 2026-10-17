@@ -86,6 +86,8 @@ npm run check:engine -- /path/to/build      # 或显式指定（也可用 LLAMA_
 node scripts/check-engine-flags.js --source ~/llama.cpp/common/arg.cpp
 ```
 
+同一个检查还会比对 decision（判决/打分）模型类型：`main/gguf.js` 的 `DECISION_TYPES` ↔ 上游 `common/common.cpp` 的 `COMMON_DECISION_TYPE_NAMES`。名单落后时界面会把引擎明明支持的模型标成「引擎不支持」（`vllm-decision2`、`vllm-d3` 就这样漏了 4 天）；名单多出则相反——界面说能用，引擎加载即失败。
+
 CI 里已经这么跑了：[`.github/workflows/engine-drift.yml`](.github/workflows/engine-drift.yml) 每天 03:17 UTC 浅克隆上游、只取 `common/`，比对一遍。放在 schedule 而不是 push，是因为上游改名时不该把无关 PR 卡红——只需要提醒。
 
 ### 判决(decision)模型兼容补丁（可选）
@@ -112,7 +114,7 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **405 项全绿**，CI 在 Node 22/24 上跑）：
+`node:test` 单元测试（不依赖 Electron，当前 **408 项全绿**，CI 在 Node 22/24 上跑）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
 - `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
@@ -133,7 +135,7 @@ npm test
 - `test/sandbox.test.js` — 子进程沙箱能力探测与启用判定
 - `test/hardware.test.js` — 跨平台硬件解析（nvidia-smi / 注册表显存 / WMI 溢出兜底 / lscpu / 多卡取最大）
 - `test/engine.test.js` — 引擎二进制候选与终端启动命令（`.exe`、`launch.cmd` 转义、各平台终端链）
-- `test/engine-flags.test.js` — 参数漂移检查的解析层（flag 抽取 / 帮助文本解析 / 差集），含对真实 `args.js`、`bench.js` 的回归断言
+- `test/engine-flags.test.js` — 参数漂移检查的解析层（flag 抽取 / 帮助文本解析 / 差集 / decision 类型解析），含对真实 `args.js`、`bench.js` 的回归断言
 - `test/reveal.test.js` — 「在文件夹中显示」的目标解析（文件高亮 / 目录直接打开 / 文件已消失时报错）
 - `test/paths.test.js` — 渲染层路径工具（Windows 反斜杠路径的取目录 / 拼路径）
 

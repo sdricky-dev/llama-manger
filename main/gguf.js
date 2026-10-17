@@ -45,7 +45,8 @@ const DRAFT_ARCHES = new Set(['dflash', 'eagle3', 'eagle', 'dspark', 'medusa']);
 // llama-server 支持的 decision（判决/打分）模型类型，见 common/common.cpp:
 // COMMON_DECISION_TYPE_NAMES。元数据 <arch>.decision.type 不在表内 → 服务启动即失败。
 const DECISION_TYPES = [
-  'openjev', 'lev', 'kev', 'nimble', 'laya', 'clef', 'pplx-decider', 'lfm2-d1', 'lfm2-d1-omni',
+  'openjev', 'lev', 'kev', 'nimble', 'laya', 'clef', 'pplx-decider',
+  'vllm-decision2', 'vllm-d3', 'lfm2-d1', 'lfm2-d1-omni', 'granite-switch',
 ];
 
 // 别名：需引擎侧打补丁（scripts/patches/decision-type-jev-alias.patch）才被接受。

@@ -149,6 +149,39 @@ function extractDeclaredFlagsFromSource(source) {
 }
 
 /**
+ * 从上游 `common/common.cpp` 抽出 decision（判决/打分）模型类型名。
+ *
+ * 上游定义在 COMMON_DECISION_TYPE_NAMES 映射里：
+ *   static const std::map<common_decision_type, std::string> COMMON_DECISION_TYPE_NAMES = {
+ *       { COMMON_DECISION_TYPE_OPENJEV, "openjev" },
+ *       ...
+ *   };
+ *
+ * 为什么也要查：main/gguf.js 用这份名单判断「引擎认不认这个 decision 模型」，
+ * 名单落后时界面会把引擎明明支持的模型标成「引擎不支持」（vllm-decision2 /
+ * vllm-d3 就漏了 4 天没人发现），漏得越多误报越多。
+ *
+ * @param {string} source common/common.cpp 源码
+ * @returns {Set<string>}
+ */
+function extractDecisionTypes(source) {
+  const lines = String(source || '').split('\n');
+  const start = lines.findIndex((l) => /COMMON_DECISION_TYPE_NAMES\s*=\s*\{/.test(l));
+  if (start < 0) return new Set();
+
+  const out = new Set();
+  // 逐行读到映射结束的 `};`，每行只取 // 之前的内容
+  // （用逐行而不是整块正则：映射末尾带一句注释，整块解析会把它当成类型名）
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*\};/.test(line)) break;
+    const code = line.split('//')[0];
+    for (const m of code.matchAll(/"([a-z0-9][a-z0-9-]*)"/g)) out.add(m[1]);
+  }
+  return out;
+}
+
+/**
  * 求差集：项目会下发、但引擎没声明的 flag。
  *
  * @param {Set<string>|string[]} emitted
@@ -162,4 +195,11 @@ function diffFlags(emitted, supported) {
   return { ok: missing.length === 0, missing, checked: list.length };
 }
 
-module.exports = { extractEmittedFlags, extractSupportedFlags, extractDeclaredFlagsFromSource, stripCppComments, diffFlags };
+module.exports = {
+  extractEmittedFlags,
+  extractSupportedFlags,
+  extractDeclaredFlagsFromSource,
+  extractDecisionTypes,
+  stripCppComments,
+  diffFlags,
+};
