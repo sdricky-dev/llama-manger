@@ -70,6 +70,85 @@ function extractSupportedFlags(helpText) {
 }
 
 /**
+ * 去掉 C++ 的 // 与 /* *\/ 注释（尊重字符串字面量，避免把描述里的 URL 截断）。
+ *
+ * 为什么需要：注释掉的 common_arg 不算"已声明"，否则上游把某个参数暂时注释掉时，
+ * 我们这边会误以为它还可用（漏报，正好是最危险的方向）。
+ *
+ * @param {string} src
+ * @returns {string}
+ */
+function stripCppComments(src) {
+  const text = String(src || '');
+  let out = '';
+  let i = 0;
+  let inStr = false;
+  let inLine = false;
+  let inBlock = false;
+  while (i < text.length) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (inLine) {
+      if (c === '\n') { inLine = false; out += c; }
+      i++;
+      continue;
+    }
+    if (inBlock) {
+      if (c === '*' && d === '/') { inBlock = false; i += 2; } else i++;
+      continue;
+    }
+    if (inStr) {
+      out += c;
+      if (c === '\\') { out += d === undefined ? '' : d; i += 2; continue; }
+      if (c === '"') inStr = false;
+      i++;
+      continue;
+    }
+    if (c === '/' && d === '/') { inLine = true; i += 2; continue; }
+    if (c === '/' && d === '*') { inBlock = true; i += 2; continue; }
+    if (c === '"') { inStr = true; out += c; i++; continue; }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * 从上游 `common/arg.cpp` 源码里抽出它声明了哪些 flag。
+ *
+ * 这一路不需要编译好的引擎，给 CI 用（CI 里只做浅克隆 + sparse checkout，不构建）。
+ *
+ * llama.cpp 的声明形如：
+ *   add_opt(common_arg(
+ *       {"-m", "--model"}, "FNAME",
+ *       "model path to load", ...));
+ *
+ * 也有一个参数挂**多个**花括号列表（正/负两种形式）的：
+ *   add_opt(common_arg(
+ *       {"-kvo", "--kv-offload"},
+ *       {"-nkvo", "--no-kv-offload"},
+ *       ...));
+ *
+ * 所以匹配的是「common_arg( 后面连续若干 {…} 列表（允许逗号分隔）」。
+ *
+ * 注意：只覆盖 common/arg.cpp。llama-bench 等工具自己的参数在各自 .cpp 里
+ * （形如 `arg == "-p"`），不在本函数范围内。
+ *
+ * @param {string} source
+ * @returns {Set<string>}
+ */
+function extractDeclaredFlagsFromSource(source) {
+  const out = new Set();
+  const text = stripCppComments(source);
+  const blockRe = /common_arg\(((?:\s*\{[^}]*\}\s*,?)+)/g;
+  let block;
+  while ((block = blockRe.exec(text)) !== null) {
+    for (const m of block[1].matchAll(/"((?:--?)[a-z][a-z0-9-]*)"/g)) out.add(m[1]);
+  }
+  return out;
+}
+
+/**
  * 求差集：项目会下发、但引擎没声明的 flag。
  *
  * @param {Set<string>|string[]} emitted
@@ -83,4 +162,4 @@ function diffFlags(emitted, supported) {
   return { ok: missing.length === 0, missing, checked: list.length };
 }
 
-module.exports = { extractEmittedFlags, extractSupportedFlags, diffFlags };
+module.exports = { extractEmittedFlags, extractSupportedFlags, extractDeclaredFlagsFromSource, stripCppComments, diffFlags };

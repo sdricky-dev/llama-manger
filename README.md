@@ -80,6 +80,14 @@ npm run check:engine -- /path/to/build      # 或显式指定（也可用 LLAMA_
 
 它会把 `shared/args.js` / `main/bench.js` 里会下发的**每一个** flag 拿去比对本地引擎 `--help` 的声明，报出引擎不认识的那些（flag 清单是扫源码得到的，新增参数自动覆盖，不用手工维护）。建议在每次 `build-engine.sh` 之后跑一次。
 
+没有编译产物也能查（改读上游 `common/arg.cpp` 的声明，不用构建，几十秒）：
+
+```bash
+node scripts/check-engine-flags.js --source ~/llama.cpp/common/arg.cpp
+```
+
+CI 里已经这么跑了：[`.github/workflows/engine-drift.yml`](.github/workflows/engine-drift.yml) 每天 03:17 UTC 浅克隆上游、只取 `common/`，比对一遍。放在 schedule 而不是 push，是因为上游改名时不该把无关 PR 卡红——只需要提醒。
+
 ### 判决(decision)模型兼容补丁（可选）
 
 部分第三方导出的判决模型把 `*.decision.type` 写成 `jev`，而引擎类型表里只有 `openjev`（两者的 `systemone` 模板与 `temperature/verbalizer_ids/bias.{noul,score,choice}` 元数据结构完全一致），不打补丁会在加载阶段直接退出：
@@ -104,7 +112,7 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **394 项全绿**，CI 在 Node 22/24 上跑）：
+`node:test` 单元测试（不依赖 Electron，当前 **404 项全绿**，CI 在 Node 22/24 上跑）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
 - `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示

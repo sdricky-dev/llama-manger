@@ -1,0 +1,45 @@
+name: Engine Drift
+
+# 上游 llama.cpp 的参数表每天在动，而项目把每个 flag 写死在 shared/args.js 里。
+# 单测只能验证「我们下发了什么」，验证不了「引擎还认不认」——这两次事故
+# （--mlock 被上游删除、--tools read_only 上游从不认）都是靠人工审计才发现的。
+#
+# 这个工作流每天解析一次上游 common/arg.cpp 的声明，比对项目会下发的每个 flag。
+#
+# 设计取舍：
+#   - 用 schedule 而不是 push：上游改名时不应该把无关 PR 卡红，只需要提醒
+#   - 不构建引擎（构建要十几分钟）：CI 里解析源码即可，几十秒完成；
+#     本地有编译产物时跑 `npm run check:engine` 会用 --help 做更准的对照
+#   - 失败时工作流变红 → GitHub 默认给仓库所有者发通知
+#   - 定时工作流在仓库连续 60 天无活动后会被自动停用
+on:
+  schedule:
+    - cron: '17 3 * * *' # 每天 03:17 UTC（北京时间 11:17）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: 上游参数漂移检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # v7 起 action 自身跑在 node24 上（与 ci.yml 保持一致）
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: 浅克隆 llama.cpp（只取 common/）
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/ggml-org/llama.cpp.git llama.cpp
+          cd llama.cpp
+          git sparse-checkout set common
+          echo "上游版本：$(git log -1 --format='%h %ci %s')"
+
+      - name: 检查参数漂移
+        run: node scripts/check-engine-flags.js --source llama.cpp/common/arg.cpp

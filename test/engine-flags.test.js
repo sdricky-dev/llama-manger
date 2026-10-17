@@ -9,7 +9,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { extractEmittedFlags, extractSupportedFlags, diffFlags } = require('../shared/engine-flags');
+const { extractEmittedFlags, extractSupportedFlags, extractDeclaredFlagsFromSource, stripCppComments, diffFlags } = require('../shared/engine-flags');
 
 /* ---------- extractEmittedFlags ---------- */
 
@@ -88,6 +88,80 @@ test('extractSupportedFlags：不把词内连字符/负数当 flag', () => {
 test('extractSupportedFlags：空输入安全', () => {
   assert.equal(extractSupportedFlags('').size, 0);
   assert.equal(extractSupportedFlags(null).size, 0);
+});
+
+/* ---------- stripCppComments ---------- */
+
+test('stripCppComments：去掉行注释与块注释', () => {
+  const src = 'a(); // 这是注释\nb();\n/* 多行\n注释 */ c();';
+  const out = stripCppComments(src);
+  assert.ok(!out.includes('这是注释'));
+  assert.ok(!out.includes('多行'));
+  assert.ok(out.includes('a();') && out.includes('b();') && out.includes('c();'));
+});
+
+test('stripCppComments：字符串里的 // 不被当成注释（描述里常有 URL）', () => {
+  const src = 'common_arg({"-m"}, "see https://example.com/x for docs");';
+  assert.equal(stripCppComments(src), src);
+});
+
+test('stripCppComments：字符串里的转义引号不会提前结束字符串', () => {
+  const src = 'x("a \\" // not comment");';
+  assert.ok(stripCppComments(src).includes('// not comment'));
+});
+
+test('stripCppComments：行注释保留换行，不把相邻两行粘在一起', () => {
+  assert.equal(stripCppComments('a(); // x\nb();'), 'a(); \nb();');
+});
+
+/* ---------- extractDeclaredFlagsFromSource（读上游 common/arg.cpp） ---------- */
+
+test('extractDeclaredFlagsFromSource：单个花括号列表', () => {
+  const src = `
+    add_opt(common_arg(
+        {"-m", "--model"}, "FNAME",
+        "model path to load",
+        [](common_params & params, const std::string & value) { params.model = value; }
+    ).set_env("LLAMA_ARG_MODEL"));
+  `;
+  const s = extractDeclaredFlagsFromSource(src);
+  assert.ok(s.has('-m') && s.has('--model'));
+  assert.equal(s.size, 2);
+});
+
+test('extractDeclaredFlagsFromSource：一个参数挂多个列表（正/负形式，逗号分隔）', () => {
+  // 真实案例：--no-kv-offload / --no-mmproj-offload 就藏在第二个列表里
+  const src = `
+    add_opt(common_arg(
+        {"-kvo", "--kv-offload"},
+        {"-nkvo", "--no-kv-offload"},
+        string_format("whether to enable KV cache offloading"),
+        [](common_params & params, bool value) { params.no_kv_offload = !value; }
+    ).set_env("LLAMA_ARG_KV_OFFLOAD"));
+  `;
+  const s = extractDeclaredFlagsFromSource(src);
+  assert.deepEqual([...s].sort(), ['--kv-offload', '--no-kv-offload', '-kvo', '-nkvo']);
+});
+
+test('extractDeclaredFlagsFromSource：三连列表也认', () => {
+  const src = 'add_opt(common_arg({"-h", "--help", "--usage"}, "desc"));';
+  assert.deepEqual([...extractDeclaredFlagsFromSource(src)].sort(), ['--help', '--usage', '-h']);
+});
+
+test('extractDeclaredFlagsFromSource：描述文本里提到的 --xxx 不算声明', () => {
+  const src = 'add_opt(common_arg({"-m", "--model"}, "FNAME", "see --load-mode for details"));';
+  const s = extractDeclaredFlagsFromSource(src);
+  assert.ok(!s.has('--load-mode'), '描述里提到的不代表声明');
+});
+
+test('extractDeclaredFlagsFromSource：注释/普通字符串不产生误报', () => {
+  const src = '// common_arg({"--fake"}) 在注释里\nconst s = "common_arg";';
+  assert.equal(extractDeclaredFlagsFromSource(src).size, 0);
+});
+
+test('extractDeclaredFlagsFromSource：空输入安全', () => {
+  assert.equal(extractDeclaredFlagsFromSource('').size, 0);
+  assert.equal(extractDeclaredFlagsFromSource(null).size, 0);
 });
 
 /* ---------- diffFlags ---------- */
