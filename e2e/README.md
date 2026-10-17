@@ -18,8 +18,42 @@ LM_MODELS_DIR=~/.lmstudio/models node e2e/cdp-eval.js e2e/step2-scan.js
 |---|---|---|
 | `LM_MODELS_DIR` | `~/models` | 步骤脚本要扫描的模型目录（**不要**把个人路径写进脚本里） |
 | `LM_SLOTS_DIR` | `~/llama-slots` | 会话存盘目录（存盘/右键相关脚本用） |
+| `LM_MODEL_MATCH` | （空 = 取列表第一个） | 选哪个模型：按路径子串匹配。判决/视觉模型不适合当聊天冒烟对象时用它指定 |
 
-`cdp-eval.js` 会先注入 `MODELS_DIR` / `SLOTS_DIR` 两个常量，步骤脚本直接用即可（`~` 会被展开成当前用户主目录）。
+`cdp-eval.js` 会先注入 `MODELS_DIR` / `SLOTS_DIR` / `MODEL_MATCH` 三个常量，步骤脚本直接用即可（`~` 会被展开成当前用户主目录）。
+
+## 最小冒烟闭环（已验证）
+
+改了参数生成 / IPC / 引擎版本之后，至少跑这一串。注意顺序：`step18` 自己会启动 server，
+所以**不要**先跑 `step5`，否则第二次点「启动」会撞上「服务已在运行」。
+
+```bash
+# 终端 1：起应用（若 shell 里有 ELECTRON_RUN_AS_NODE 必须先 unset）
+env -u ELECTRON_RUN_AS_NODE npx electron . --remote-debugging-port=9222
+
+# 终端 2
+export LM_MODELS_DIR=~/.lmstudio/models      # 按需改
+export LM_SLOTS_DIR=~/llama-slots
+export LM_MODEL_MATCH=ZDTaichu               # 按需改：选一个能做对话的模型
+
+node e2e/cdp-eval.js e2e/step2-scan.js         # 扫描到模型
+node e2e/cdp-eval.js e2e/step3-select.js       # 选中（按 LM_MODEL_MATCH）
+node e2e/cdp-eval.js e2e/step4-oneclick.js     # 一键配置 + 内存估算
+node e2e/cdp-eval.js e2e/step18-slot-setup.js  # 填存盘目录并启动 server
+node e2e/cdp-eval.js e2e/step19-slot-flow.js   # 保存 → 清空 → 恢复 → 删除存盘文件
+node e2e/cdp-eval.js e2e/step6-chat.js         # 流式对话
+node e2e/cdp-eval.js e2e/step7-stop.js         # 停止
+```
+
+最近一次实测（Electron 44 / 引擎 build 11698 / Qwen3.5-9B Q5_K_M）：
+扫描 4 个模型 · 一键配置占用 18.71 GB · server「运行中」· 存盘 70ms / 恢复 24ms · 对话 2s · 停止「未运行」。
+
+两个额外的手工检查（脚本覆盖不到）：
+
+- **参数是否真的进了命令行**：在渲染层读 `#cmdPreview`（`step18` 就是这么断言 `--slot-save-path` 的）。
+- **窗口状态持久化**：`window.resizeTo(1100,760)` → 关窗 → 重启，尺寸应被记住。
+  状态存在 `userData/Local State` 的 `windowStates.<name>`；**硬杀进程（SIGTERM/kill -9）不会落盘**。
+
 
 ## 步骤一览
 

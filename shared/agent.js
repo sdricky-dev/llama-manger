@@ -19,19 +19,21 @@
  *   - 'read'    只读，agent 模式下默认放行
  *   - 'write'   写文件，需要用户确认
  *   - 'execute' 执行 shell 命令，必须用户确认
- *   - 'network' 网络访问（http_fetch / web_search），需要用户确认
+ *   - 'network' 网络访问，需要用户确认
+ *
+ * 这里只列 llama-server **真实内置**的工具（与 SERVER_TOOLS 一致）。
+ * get_datetime 在上游 666f8898a 被移到 UI 侧、http_fetch/web_search 从来不在
+ * server 工具表里，把它们留在分类表里只会让"自动放行集合"和实际下发的
+ * --tools 名单不一致，所以已删除；未知名字仍按 execute（最严格）处理。
  */
 const TOOL_CATEGORIES = {
   read_file: 'read',
   file_glob_search: 'read',
   grep_search: 'read',
-  get_datetime: 'read',
   get_info: 'read',
   write_file: 'write',
   edit_file: 'write',
   exec_shell_command: 'execute',
-  http_fetch: 'network',
-  web_search: 'network',
 };
 
 /**
@@ -40,9 +42,9 @@ const TOOL_CATEGORIES = {
  * 对照上游 `common/arg.cpp` 里 --tools 的帮助文本（"available tools: ..."）：
  *   read_file, file_glob_search, grep_search, exec_shell_command, write_file, edit_file, get_info
  *
- * 注意 TOOL_CATEGORIES 里还有 get_datetime / http_fetch / web_search —— 它们由**前端**提供
- * （get_datetime 在上游 666f8898a 被移到 UI 侧），并不在 server 的工具表里。
- * 把这类名字传给 --tools，引擎会在启动时直接抛 "unknown tool ..." 退出。
+ * 注意 get_datetime 在上游 666f8898a 被移到 UI 侧、http_fetch/web_search 也从来不在
+ * server 工具表里：这类名字传给 --tools，引擎会在启动时直接抛 "unknown tool ..." 退出，
+ * 所以 TOOL_CATEGORIES 与 expandToolsArg() 都只保留下面这 7 个。
  */
 const SERVER_TOOLS = [
   'read_file',

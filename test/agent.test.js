@@ -26,7 +26,8 @@ test('categorizeTool：已知工具返回正确分类', () => {
   assert.equal(categorizeTool('read_file'), 'read');
   assert.equal(categorizeTool('write_file'), 'write');
   assert.equal(categorizeTool('exec_shell_command'), 'execute');
-  assert.equal(categorizeTool('http_fetch'), 'network');
+  // 上游的 7 个内置工具里没有 network 类；未知名字按 execute 处理（见下一条）
+  assert.equal(categorizeTool('http_fetch'), 'execute');
 });
 
 test('categorizeTool：未知工具默认视为 execute（最严格）', () => {
@@ -37,15 +38,15 @@ test('categorizeTool：未知工具默认视为 execute（最严格）', () => {
 test('toolRequiresConfirm：read 类不需确认', () => {
   assert.equal(toolRequiresConfirm('read_file'), false);
   assert.equal(toolRequiresConfirm('grep_search'), false);
-  assert.equal(toolRequiresConfirm('get_datetime'), false);
+  assert.equal(toolRequiresConfirm('get_info'), false);
 });
 
 test('toolRequiresConfirm：write / execute / network 都需确认', () => {
   assert.equal(toolRequiresConfirm('write_file'), true);
   assert.equal(toolRequiresConfirm('edit_file'), true);
   assert.equal(toolRequiresConfirm('exec_shell_command'), true);
+  // 上游没有的工具名按最严格处理（execute → 需确认）
   assert.equal(toolRequiresConfirm('http_fetch'), true);
-  assert.equal(toolRequiresConfirm('web_search'), true);
 });
 
 /* ---------- autoApproveSet ---------- */
@@ -56,13 +57,12 @@ test('autoApproveSet：none → 空集', () => {
   assert.equal(autoApproveSet(undefined).size, 0);
 });
 
-test('autoApproveSet：read_only → 5 个只读工具', () => {
+test('autoApproveSet：read_only → 4 个只读工具', () => {
   const s = autoApproveSet('read_only');
-  assert.equal(s.size, 5);
+  assert.equal(s.size, 4);
   assert.ok(s.has('read_file'));
   assert.ok(s.has('file_glob_search'));
   assert.ok(s.has('grep_search'));
-  assert.ok(s.has('get_datetime'));
   assert.ok(s.has('get_info'));
   assert.ok(!s.has('write_file'));
   assert.ok(!s.has('exec_shell_command'));
@@ -120,8 +120,24 @@ test('expandToolsArg：去重、去空格，混入 read_only / all 也正确', (
 });
 
 test('autoApproveSet：多个工具名以逗号分隔', () => {
-  const s = autoApproveSet('read_file, get_datetime');
-  assert.equal(s.size, 2);
+  const s = autoApproveSet('read_file, read_only');
+  assert.equal(s.size, 4, 'read_only 会展开成 4 个只读工具');
+  assert.ok(s.has('read_file') && s.has('get_info'));
+  // 引擎不认识的名字不会被当成"可放行"
+  assert.equal(autoApproveSet('read_file, get_datetime').size, 1);
+});
+
+test('autoApproveSet 不会超出 expandToolsArg 启用的范围（放行集合 ⊆ 实际启用）', () => {
+  // 两条路径曾各自维护名单导致漂移。约束是：被自动放行的工具，
+  // 必须是这次真的会下发给引擎的工具。
+  const enabled = (v) => new Set(v === 'all' ? SERVER_TOOLS : expandToolsArg(v));
+  for (const v of ['read_only', 'all', 'read_file,grep_search', 'none']) {
+    for (const t of autoApproveSet(v)) {
+      assert.ok(enabled(v).has(t), `${v}：放行了未启用的工具 ${t}`);
+    }
+  }
+  // 纯只读场景下两者应完全相等
+  assert.deepEqual([...autoApproveSet('read_only')].sort(), [...expandToolsArg('read_only')].sort());
 });
 
 /* ---------- extractToolCalls ---------- */

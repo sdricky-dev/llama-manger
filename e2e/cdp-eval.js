@@ -38,6 +38,8 @@ const fs = require('fs');
   const preamble = `
 const MODELS_DIR = ${JSON.stringify(expand(process.env.LM_MODELS_DIR, '~/models'))};
 const SLOTS_DIR = ${JSON.stringify(expand(process.env.LM_SLOTS_DIR, '~/llama-slots'))};
+// 选模型用的子串匹配（不设则取列表第一个）；避免把个人模型名写死进脚本
+const MODEL_MATCH = ${JSON.stringify(process.env.LM_MODEL_MATCH || '')};
 `;
   try {
     const res = await send('Runtime.evaluate', {
