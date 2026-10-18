@@ -1,9 +1,9 @@
 diff --git a/common/common.cpp b/common/common.cpp
-index 9a71a33ff..b220ee076 100644
+index b59e66e3b..f16a062a5 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -1174,7 +1174,18 @@ static const std::map<common_decision_type, std::string> COMMON_DECISION_TYPE_NA
-     { COMMON_DECISION_TYPE_LFM2_D1_OMNI,   "lfm2-d1-omni"  },
+@@ -1178,7 +1178,18 @@ static const std::map<common_decision_type, std::string> COMMON_DECISION_TYPE_NA
+     // for future models, ALWAYS add org name prefix to avoid name collisions, e.g. "orgname-modelname"
  };
  
 +// 兼容别名：某些第三方导出的 GGUF 使用旧/变体类型名。
