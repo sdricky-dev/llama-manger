@@ -51,10 +51,13 @@ test('kvBytesPerToken q8_0 比 f16 省约一半', () => {
   assert.ok(q8 < f16 * 0.6 && q8 > f16 * 0.4, `q8=${q8} f16=${f16}`);
 });
 
-test('kvCacheBytes 随 ctx 与 parallel 线性', () => {
+test('kvCacheBytes：-c 是 KV 池总量，并行只切分不放大（引擎实测）', () => {
   const p1 = kvCacheBytes(DENSE, { ctx: 8192, parallel: 1, cacheTypeK: 'f16', cacheTypeV: 'f16' });
+  assert.equal(p1, 32 * 8 * 128 * 4 * 8192, '全池 = ctx 个 cell');
   const p2 = kvCacheBytes(DENSE, { ctx: 16384, parallel: 2, cacheTypeK: 'f16', cacheTypeV: 'f16' });
-  assert.equal(p2, p1 * 4);
+  assert.equal(p2, p1 * 2, 'ctx 翻倍 → 池翻倍');
+  const p4 = kvCacheBytes(DENSE, { ctx: 8192, parallel: 4, cacheTypeK: 'f16', cacheTypeV: 'f16' });
+  assert.equal(p4, p1, '并行 4：8192 cells（= 4 槽 × 2048），总量不变');
 });
 
 test('usableRamGB 保留 8GB 或 20%', () => {

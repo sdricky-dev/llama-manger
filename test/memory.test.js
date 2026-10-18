@@ -47,7 +47,7 @@ test('MoE：ncpuMoe=nLayer 时 GPU 只留 15% 权重', () => {
   assert.ok(Math.abs(m.wCpu - 30e9 * 0.85) / 30e9 < 0.001);
 });
 
-test('并行数放大 KV', () => {
+test('并行数：KV 池总量不变（-c 即池大小，引擎按槽切分）', () => {
   const a = memoryBreakdown({
     model: MODEL,
     params: { ngl: 'all', ctx: 8192, parallel: 1, cacheTypeK: 'f16', cacheTypeV: 'f16', batch: 2048 },
@@ -58,7 +58,7 @@ test('并行数放大 KV', () => {
     params: { ngl: 'all', ctx: 8192, parallel: 4, cacheTypeK: 'f16', cacheTypeV: 'f16', batch: 2048 },
     hw: HW,
   });
-  assert.equal(b.kv, a.kv * 4);
+  assert.equal(b.kv, a.kv, '并行 4：4 槽 × 2048 cells = 8192，总量与串行一致');
 });
 
 test('内存不足 → ok=false 且 free 为负', () => {

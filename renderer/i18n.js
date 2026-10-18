@@ -54,7 +54,8 @@ export const PARAMS = {
     step: 256,
     def: 4096,
     desc: '提示词上下文窗口（token 数）。越大模型能记住的对话/文档越长，但 KV 缓存内存随长度线性增长。',
-    related: 'KV 内存 = 层数×KV头数×头维×精度×上下文×并行数。右侧换算工具可双向查看；超过模型训练长度时建议 YaRN。',
+    related:
+      'KV 内存 = 逐层 KV 头数×头维×精度 累加 × 上下文（`-c` 即 KV 池总量，并行只切分不放大；SWA 层按窗口缓存）。右侧换算工具可双向查看；超过模型训练长度时建议 YaRN。',
   },
   cacheTypeK: {
     label: 'KV 缓存精度 (K)',
@@ -83,7 +84,7 @@ export const PARAMS = {
     step: 1,
     def: 1,
     desc: 'server 模式同时处理的会话数。每个会话独立 KV 缓存。',
-    related: 'KV 缓存内存 × 并行数。本机单用户建议 1。',
+    related: 'KV 池总量由 ctx 决定（并行只切分不放大）；每槽上下文 = ctx ÷ 并行数。本机单用户建议 1。',
     showIf: (s) => s.mode === 'server',
   },
   swaFull: {
@@ -92,7 +93,7 @@ export const PARAMS = {
     type: 'check',
     def: false,
     desc: '对滑窗注意力(SWA)模型使用完整尺寸缓存（占更多内存，保留全部历史）。一般保持关闭。',
-    related: '仅对带滑动窗口的模型有意义。',
+    related: '仅对带滑动窗口的模型有意义：关闭（默认）时 SWA 层只按「窗口 + 余量」分配缓存，KV 估算按此口径。',
   },
 
   // ---------- 附属文件 ----------

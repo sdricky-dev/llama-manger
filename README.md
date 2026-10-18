@@ -19,8 +19,8 @@ llama.cpp 一键启动器（Electron 桌面应用）。
 | 量化实测 | 读 **tensor 表**按元素数加权推导真实量化（发布者的 `general.file_type` 经常写错，如 BF16 的 mmproj 标成 IQ3_S）；元数据不一致时界面标注"元数据 X 不准" |
 | 一键配置 | 内存模型估算（权重 + 附属文件 + KV + 计算缓冲）→ 推荐 ngl / ctx / KV 精度 / MoE 专家卸载 / 线程 / 采样 |
 | 参数说明 | 每个参数中文说明（hover 提示）+ 关联说明（控件下方小字） |
-| 关联提示 | 上下文>训练长度→YaRN 警告；超内存→红色提示+一键修复（降 ctx / q8_0 KV / 增专家卸载）；并行→KV×N 提示；线程超 P 核提示；**内置 MTP → 一键开启 `--spec-type draft-mtp`**；草稿模型类型不匹配→提示纠正；**decision 模型类型不受引擎支持→红色预警** |
-| 换算工具 | 当前 ctx ↔ KV 占用 GB；内存预算 → 最大可容纳上下文（实时）。KV 口径按「真实带 KV 的层 × 每层 KV 头 × 头维」逐层累加，与引擎日志一致（256K q8_0 = 8704 MiB） |
+| 关联提示 | 上下文>训练长度→YaRN 警告；超内存→红色提示+一键修复（降 ctx / q8_0 KV / 增专家卸载）；并行>1→每槽上下文提示（KV 池总量不变）；线程超 P 核提示；**内置 MTP → 一键开启 `--spec-type draft-mtp`**；草稿模型类型不匹配→提示纠正；**decision 模型类型不受引擎支持→红色预警** |
+| 换算工具 | 当前 ctx ↔ KV 占用 GB；内存预算 → 最大可容纳上下文（实时）。KV 口径按引擎实际分配逐层累加（含 SWA 窗口缓存与并行池语义），与引擎日志一致（256K q8_0 = 8704 MiB；GEV-26B 8192 ctx = 1060 MiB） |
 | 内存面板 | 堆叠条：GPU 权重 / 内存池权重 / KV / 计算 / 空闲（附属文件单列），修改参数实时重算 |
 | 视觉 / 加速 | `-mm` 视觉投影（默认 GPU 卸载）、`-md` 草稿模型 + `--spec-type`；**投机解码下拉框按当前模型能力过滤**：只有内置 MTP 或配套草稿模型时才列出 draft-*，ngram-* 恒可用，不可用项隐藏并在旁注明原因；**草稿有专用实现（dflash/eagle3/dspark）时禁用通用 `draft-simple` 并自动纠正已有取值**（选错会静默变慢，见「投机解码」节的实测表）；`--spec-draft-n-max` 与 `--spec-draft-n-ubatch` 可在高级选项里调，附实测拐点与省显存取舍说明 |
 | 启动 | server：进程托管 + 日志流 + 就绪检测 + 优雅停止；cli：生成脚本在 Terminal.app 打开（真实 TTY） |
@@ -117,13 +117,13 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **433 项全绿**，CI 在 Node 22/24 上跑）：
+`node:test` 单元测试（不依赖 Electron，当前 **437 项全绿**，CI 在 Node 22/24 上跑）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
-- `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示
+- `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示、KV 池口径（并行不放大）
 - `test/recommend-discrete.test.js` — PC 双预算规划（9 种显存/内存组合 + 规划器与内存面板口径一致性不变量）
-- `test/memory.test.js` — 内存模型：ngl 比例、KV 精度/并行缩放、超限判定
-- `test/kv-geometry.test.js` — KV「哪些层、每层多大」：混合 SSM 的 recurrent 语义、MTP 层排除、`full_attention_interval` 兜底、gemma4 逐层 KV 头与 SWA 头维（含与引擎日志对齐的 8704 MiB 校验）
+- `test/memory.test.js` — 内存模型：ngl 比例、KV 精度、并行池（总量不变）、超限判定
+- `test/kv-geometry.test.js` — KV「哪些层、每层多大、多少 cells」：混合 SSM 的 recurrent 语义、MTP 层排除、`full_attention_interval` 兜底、gemma4 逐层 KV 头与 SWA 头维（与引擎日志对齐的 8704 MiB 校验）、**SWA 窗口缓存口径（GEV-26B 实测 1060 MiB / `-np 2` 760 MiB）、标量滑动窗口模式、并行池语义、渲染层与主进程口径一致性**
 - `test/args.test.js` — CLI 参数映射（对照 llama.cpp 源码核对过标志名；含已删除的 `--mlock/--mmap/-dio` 不再下发、`--tools read_only` 展开）
 - `test/migrate.test.js` — 旧参数迁移：`--mmap/--mlock/-dio` → `--load-mode`（含 `loadMode:'auto'` 不吞掉旧字段）
 - `test/role.test.js` — 文件角色 / 量化实测 / decision 类型 / 附属文件归组
@@ -162,13 +162,14 @@ renderer/
   app.js         UI 逻辑（提示规则、换算、聊天流、右键菜单接线）
   ctxmenu.js     通用右键菜单组件
   paths.js       路径字符串工具（兼容 Windows 反斜杠，纯函数）
+  kvmath.js      KV cells/字节口径（与 main/recommend.js 同公式，纯函数）
   i18n.js        参数元数据中心（中文说明/关联说明）
   styles.css     深色主题
 test/            node:test 单元测试 + GGUF 夹具生成器
   role.test.js   文件角色识别 / tensor 实测量化 / decision 类型 / 附属文件归组
   spec.test.js   投机解码类型与模型能力的匹配矩阵
   slots.test.js  会话存盘的磁盘操作（文件名校验 / 列目录 / 删除 / 防路径穿越）
-  kv-geometry.test.js  KV 层数与几何（混合 SSM / MTP / SWA）
+  kv-geometry.test.js  KV 层数、几何与 cells 口径（混合 SSM / MTP / SWA 窗口缓存 / 并行池）
   reveal.test.js 文件定位目标解析（高亮 / 打开目录 / 缺失报错）
   paths.test.js  路径工具（Windows 反斜杠）
 scripts/build-engine.sh  引擎重建脚本（macOS / Linux）
@@ -182,8 +183,10 @@ e2e/             CDP 端到端脚本（`node e2e/cdp-eval.js <步骤脚本>`，�
 ## 内存模型（一键配置的算法核心）
 
 ```
-KV 字节/ token = Σ_注意力层( KV头数 × K头维 ) × K精度字节 + Σ_注意力层( KV头数 × V头维 ) × V精度字节
-总占用 = 主模型 + mmproj + 草稿模型 + KV × 上下文 × 并行数 + 计算缓冲(≈1.5GB + 0.5GB×batch/2048)
+KV 每cell字节 = Σ_注意力层( KV头数 × K头维 ) × K精度字节 + Σ_注意力层( KV头数 × V头维 ) × V精度字节
+KV 总字节 = 非SWA层每cell字节 × ctx          （`-c` 即 KV 池总量，并行只切分不放大）
+          + SWA层每cell字节 × pad256(min(每槽ctx, 窗口 × (unified时槽数,否则1) + ubatch))   ← --swa-full 时改用 ctx
+总占用 = 主模型 + mmproj + 草稿模型 + KV 缓存 + 计算缓冲(≈1.5GB + 0.5GB×batch/2048)
 可用内存 = 总内存 − max(8GB, 20%×总内存)
 ```
 
@@ -192,6 +195,8 @@ KV 字节/ token = Σ_注意力层( KV头数 × K头维 ) × K精度字节 + Σ_
   2. 混合 SSM/注意力架构（`qwen35` 等）只有**非 recurrent** 层存 KV：`attention.recurrent_layers[i] = true` 表示该层是 SSM 层（**要数 false 的个数**，数 true 会得到 SSM 层数，直接错 3 倍）；
   3. 没有 `recurrent_layers` 时用 `full_attention_interval` 推（每 N 层一个全注意力层）。
 - **每层的 KV 头数与头维可能逐层不同**（gemma4 滑动窗口：`attention.head_count_kv` 是数组，SWA 层用 `key_length_swa`），逐层累加而不是拿最大值乘层数。
+- **SWA 层只建「窗口缓存」而不是整个上下文**（引擎默认 `--swa-full off`）：cells = `pad256(min(每槽 ctx, 窗口 × 槽数 + ubatch))`（`llama-kv-cache-iswa.cpp`）。SWA 层判定与引擎 `set_swa_pattern` 同语义（`sliding_window_pattern` 数组逐层，标量 N 时每 N 层一个模式；`modern-bert`/`smallthinker`/`laguna`/`cohere2moe` 是「第 0 层全注意力」，其余默认「每块最后一层全注意力」）。实测：GEV-26B（gemma4，30 层 = 25 SWA×8头×256维 + 5 全注意力×2头×512维，窗口 1024，8192 ctx）引擎日志 `non-SWA 8192 cells` + `SWA 4608 cells`（= 1024×4槽+512）= **1060 MiB**；关掉窗口口径（`--swa-full`）会算成 1760 MiB，虚高 1.66×。
+- **并行不放大 KV 池**：`-c` 是 KV 池总量（实测 `-c 8192 -np 2`：每槽 4096 cells × 2 流 = 8192，SWA 每槽 1536 cells × 2 流，合计 760 MiB，与应用估算一致）。并行只切分**每槽上下文**（`≈ ctx ÷ 并行数`），界面按此提示。
 - 实测校验：Swift-1.5-Qwen3.8-27B（65 层 / 16 个注意力层 / 4 KV 头 / 头维 256）在 256K 上下文下 **q8_0 KV = 8704 MiB**，与 `llama-server -v` 日志的 `llama_kv_cache: size = 8704.00 MiB (262144 cells, 16 layers, ...)` 完全一致（f16 则 17.18GB）。
 - **头维**优先取 `attention.key_length`：混合架构下 `embedding_length/head_count` 会失真（213 vs 实际 256）。
 - **上下文优先拉满到模型训练长度**：从训练长度向下找可容纳档位（档位 4K…256K，上限跟随 `context_length`），装不下再降 KV 精度（只自动用 f16 → q8_0；q4_0 质量损失可感，只在连最小档都装不下时兜底，其余情况仅作为「理论上可到 X」的提示）。

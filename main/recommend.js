@@ -4,7 +4,10 @@
  *
  * 内存模型（Apple Silicon 统一内存）：
  *   总占用 = 权重 W + 附属文件(mmproj/草稿模型) + KV 缓存 + 计算缓冲
- *   KV(ctx) = nLayer * nKvHead * headDim * (kBytes + vBytes) * ctx * parallel
+ *   KV 缓存与引擎实际分配同口径（llama-kv-cache-iswa.cpp，实测日志核对过）：
+ *     非 SWA 层 = 每 cell 元素数 × 精度字节 × ctx（`-c` 即 KV 池总量，并行只切分不放大）
+ *     SWA 层   = 窗口缓存 pad256(min(每槽 ctx, 窗口 × (unified 时槽数，否则 1) + ubatch))
+ *                （--swa-full 时同非 SWA 层）
  *   可用内存 usable = ram - max(8GB, 20%·ram)（OS 与常驻应用保留）
  *
  * CUDA 机器（预留）：另需检查 GPU 常驻权重 ≤ 显存。
@@ -77,9 +80,64 @@ function kvBytesPerToken(model, kType, vType) {
   return layers * model.nKvHead * model.headDim * (k + v);
 }
 
+// ---------- KV 缓存 cells 口径（与引擎实际分配一致） ----------
+// 非 SWA 层：整个 ctx 都建 cells。`-c` 是 KV 池总量——并行只切分不放大
+//（实测：`-c 4096 -np 2` 每槽 2048 cells × 2 流 = 4096，与非并行时一致）。
+// SWA 层（swaFull=false）：只建「窗口 + 余量」的窗口缓存：
+//   size_swa = PAD256(min(每槽 ctx, n_swa × (unified ? 槽数 : 1) + n_ubatch))  （llama-kv-cache-iswa.cpp）
+// 槽数：应用仅在 parallel>1 时下发 -np；否则引擎 auto = 4 槽 + kv_unified。
+const AUTO_SLOTS = 4;
+const PAD_CELLS = 256; // 引擎 GGML_PAD(x, 256)
+
+function padCells(n) {
+  return Math.ceil(n / PAD_CELLS) * PAD_CELLS;
+}
+
+/**
+ * 引擎口径的 KV cells 数，base（非 SWA 层）与 swa（SWA 层）分开。
+ * 实测依据（llama-server -v）：
+ *   gemma4 / -c 8192（auto 4 槽 + unified）→ non-SWA 8192 cells、SWA 4608 cells（1024×4+512）
+ */
+function kvCells(model, { ctx, parallel = 1, ubatch = 512, swaFull = false } = {}) {
+  const nCtx = Math.max(1, Number(ctx) || 4096);
+  const par = Math.max(1, Number(parallel) || 1);
+  const unified = par <= 1;
+  const slots = unified ? AUTO_SLOTS : par;
+  const cellsPerSeq = unified ? padCells(nCtx) : padCells(Math.floor(nCtx / par));
+  const base = cellsPerSeq * (unified ? 1 : par);
+  const hasSwa = Number(model.swaWindow) > 0 && (model.kvUnitsKSwa || model.kvUnitsVSwa);
+  let swa = 0;
+  if (hasSwa) {
+    if (swaFull) {
+      swa = base;
+    } else {
+      const ub = Math.max(1, Number(ubatch) || 512);
+      // 引擎：n_swa ×（unified 时才是槽数） + ubatch，再 pad256
+      const win = unified
+        ? Number(model.swaWindow) * slots + ub
+        : Number(model.swaWindow) + ub;
+      swa = padCells(Math.min(cellsPerSeq, win)) * (unified ? 1 : par);
+    }
+  }
+  return { base, swa };
+}
+
 function kvCacheBytes(model, params) {
-  const perTok = kvBytesPerToken(model, params.cacheTypeK || 'f16', params.cacheTypeV || 'f16');
-  return perTok * (params.ctx || 4096) * (params.parallel || 1);
+  const k = KV_ELEM_BYTES[params.cacheTypeK || 'f16'] ?? 2.0;
+  const v = KV_ELEM_BYTES[params.cacheTypeV || 'f16'] ?? 2.0;
+  const ku = model.kvUnitsK || 0;
+  const vu = model.kvUnitsV || model.kvUnitsK || 0;
+  if (!ku && !vu) {
+    // 老对象/测试桩：只有层数×头数×头维时按同一 cells 口径回退
+    const perTok = kvBytesPerToken(model, params.cacheTypeK || 'f16', params.cacheTypeV || 'f16');
+    return perTok * kvCells(model, params).base;
+  }
+  const { base, swa } = kvCells(model, params);
+  const kuSwa = model.kvUnitsKSwa || 0;
+  const vuSwa = model.kvUnitsVSwa || 0;
+  const kuFull = Math.max(0, ku - kuSwa);
+  const vuFull = Math.max(0, vu - vuSwa);
+  return (kuFull * k + vuFull * v) * base + (kuSwa * k + vuSwa * v) * swa;
 }
 
 /**
@@ -131,15 +189,21 @@ function memoryBreakdown({ model, params, hw }) {
     const freeRam = ramBudget - ramUsed;
 
     // 可容纳的最大上下文：显存与内存须同时满足（由主进程算好返回，渲染层不再重复 KV 数学）
-    const perTok = kvBytesPerToken(model, params.cacheTypeK || 'f16', params.cacheTypeV || 'f16');
     const par = params.parallel || 1;
     let maxCtx = 0;
-    if (perTok > 0) {
+    if (kvBytesPerToken(model, params.cacheTypeK || 'f16', params.cacheTypeV || 'f16') > 0) {
       let lo = 256;
       let hi = 1048576;
       while (lo <= hi) {
         const mid = Math.floor((lo + hi) / 2);
-        const kvMid = perTok * mid * par;
+        const kvMid = kvCacheBytes(model, {
+          ctx: mid,
+          parallel: par,
+          cacheTypeK: params.cacheTypeK || 'f16',
+          cacheTypeV: params.cacheTypeV || 'f16',
+          ubatch: params.ubatch,
+          swaFull: params.swaFull,
+        });
         const okMid =
           vramWeights + (kvOnGpu ? kvMid : 0) + gpuCompute <= vram &&
           ramWeights + (kvOnGpu ? 0 : kvMid) + attachOnRam(params, model) + compute <= ramBudget;
@@ -254,10 +318,26 @@ function usableRamGB(hw) {
  * 判断给定 ctx 与 KV 类型是否装得下。
  * @param {number} [extraGB] 附属文件（mmproj/草稿）额外占用
  */
-function fits({ model, ctx, kType, vType, parallel, usableGB, extraGB = 0 }) {
-  const perTok = kvBytesPerToken(model, kType, vType);
-  const totalGB =
-    model.sizeBytes / 1e9 + extraGB + (perTok * ctx * parallel) / 1e9 + 2;
+function fits({
+  model,
+  ctx,
+  kType,
+  vType,
+  parallel,
+  usableGB,
+  extraGB = 0,
+  ubatch = 512,
+  swaFull = false,
+}) {
+  const kv = kvCacheBytes(model, {
+    ctx,
+    parallel: parallel || 1,
+    cacheTypeK: kType,
+    cacheTypeV: vType,
+    ubatch,
+    swaFull,
+  });
+  const totalGB = model.sizeBytes / 1e9 + extraGB + kv / 1e9 + 2;
   return totalGB <= usableGB;
 }
 
@@ -269,13 +349,26 @@ function fmtCtx(n) {
 
 /**
  * 指定 KV 精度与内存预算下能容纳的最大上下文（用于「f16 只能到 X」这类提示）。
+ * SWA 模型是分段函数（窗口缓存部分封顶），用二分求最大 ctx。
  */
 function maxCtxFor(model, kvType, usableGB, extraGB = 0) {
-  const perTok = kvBytesPerToken(model, kvType, kvType);
-  if (!perTok) return 0;
   const avail = usableGB - model.sizeBytes / 1e9 - extraGB - 2;
   if (avail <= 0) return 0;
-  return Math.max(0, Math.floor((avail * 1e9) / perTok));
+  const budgetBytes = avail * 1e9;
+  let lo = 256;
+  let hi = 1048576;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const kv = kvCacheBytes(model, { ctx: mid, parallel: 1, cacheTypeK: kvType, cacheTypeV: kvType });
+    if (kv <= budgetBytes) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
 }
 
 /**
@@ -657,6 +750,9 @@ module.exports = {
   KV_ELEM_BYTES,
   MOE_EXPERT_FRAC,
   KV_FALLBACK,
+  AUTO_SLOTS,
+  padCells,
+  kvCells,
   kvBytesPerToken,
   kvCacheBytes,
   memoryBreakdown,

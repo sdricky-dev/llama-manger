@@ -281,20 +281,40 @@ function extractModelInfo(meta, filePath, nameOverride) {
   const nAttnLayer = attnFlags.filter(Boolean).length || nLayer;
   // 4) 每层的 K/V 元素数（heads × head_dim）；SWA 层的头维可能更小
   const swaPattern = A('attention.sliding_window_pattern');
+  // 滑动窗口大小：引擎按它给 SWA 层分配「窗口缓存」（cells 数不是整个 ctx，见 recommend.js）
+  const swaWindow = Number(A('attention.sliding_window')) || 0;
   const keyLen = Number(A('attention.key_length')) || headDim;
   const valLen = Number(A('attention.value_length')) || keyLen;
   const keyLenSwa = Number(A('attention.key_length_swa')) || keyLen;
   const valLenSwa = Number(A('attention.value_length_swa')) || valLen;
+  // SWA 层判定与引擎一致（llama-model.cpp load_swa_pattern → set_swa_pattern）：
+  //   - 数组：逐层 true/false（gemma4 等）
+  //   - 标量 N：每 N 层一个模式，默认「每块最后一层是全注意力」；
+  //     以下 arch 的引擎调用传了 dense_first=true（每块第 0 层是全注意力）
+  const SWA_DENSE_FIRST = new Set(['modern-bert', 'smallthinker', 'laguna', 'cohere2moe']);
+  const swaFlagAt = (i) => {
+    if (Array.isArray(swaPattern)) return !!swaPattern[i];
+    const n = Number(swaPattern) || 0;
+    if (n <= 0) return false;
+    return SWA_DENSE_FIRST.has(arch) ? i % n !== 0 : i % n < n - 1;
+  };
   let kvUnitsK = 0;
   let kvUnitsV = 0;
+  // SWA 层单独累计：窗口缓存只作用于这部分层
+  let kvUnitsKSwa = 0;
+  let kvUnitsVSwa = 0;
   const attnLayerIdx = [];
   for (let i = 0; i < attnFlags.length; i++) {
     if (!attnFlags[i]) continue;
     attnLayerIdx.push(i);
     const heads = kvHeadPerLayer ? Number(kvHeadPerLayer[i]) || 0 : nKvHead;
-    const swa = Array.isArray(swaPattern) ? !!swaPattern[i] : false;
+    const swa = swaFlagAt(i);
     kvUnitsK += heads * (swa ? keyLenSwa : keyLen);
     kvUnitsV += heads * (swa ? valLenSwa : valLen);
+    if (swa) {
+      kvUnitsKSwa += heads * keyLenSwa;
+      kvUnitsVSwa += heads * valLenSwa;
+    }
   }
   if (!kvUnitsK) {
     kvUnitsK = nAttnLayer * nKvHead * headDim;
@@ -327,12 +347,15 @@ function extractModelInfo(meta, filePath, nameOverride) {
     nextnLayers: nextn, // MTP/nextn 层数（不占主模型 KV）
     kvUnitsK, // 每 token 的 K 元素数（= Σ 层 heads×head_dim，含 SWA 差异）
     kvUnitsV, // 每 token 的 V 元素数
+    kvUnitsKSwa, // 其中 SWA 层的 K 元素数（引擎对它们只建窗口大小的缓存）
+    kvUnitsVSwa, // 其中 SWA 层的 V 元素数
+    swaWindow, // attention.sliding_window（0 = 非 SWA 模型）
     kvGeometry: {
       layers: attnFlags.length,
       attnLayers: attnLayerIdx.length,
       interval: interval || null,
       perLayerHeads: !!kvHeadPerLayer,
-      swa: Array.isArray(swaPattern) ? attnLayerIdx.filter((i) => swaPattern[i]).length : 0,
+      swa: attnLayerIdx.filter((i) => swaFlagAt(i)).length,
     },
     isMoe: expertCount > 0,
     expertCount,

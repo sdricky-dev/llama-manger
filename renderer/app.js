@@ -4,6 +4,7 @@
 import { PARAMS, GROUPS, fmtGB, GB } from './i18n.js';
 import { showMenu } from './ctxmenu.js';
 import { baseName, dirOf, joinPath } from './paths.js';
+import { kvCacheBytes } from './kvmath.js';
 
 const $ = (id) => document.getElementById(id);
 const api = window.lm;
@@ -644,11 +645,6 @@ function updateMaxCtx() {
   }
   const k = params.cacheTypeK || 'f16';
   const v = params.cacheTypeV || 'f16';
-  const KV_ELEM = { f32: 4, f16: 2, bf16: 2, q8_0: 1.03, q4_0: 0.53, q4_1: 0.56, iq4_nl: 0.75, q5_0: 0.69, q5_1: 0.72 };
-  // 混合 SSM/注意力架构只按注意力层计 KV（与 recommend.js 一致）
-  const layers = model.nAttnLayer || model.nLayer;
-  const perTok = layers * model.nKvHead * model.headDim * ((KV_ELEM[k] ?? 2) + (KV_ELEM[v] ?? 2));
-  const par = params.parallel || 1;
 
   // PC（独立显卡）：显存与内存各自都要装得下
   if (mem && mem.mode === 'discrete') {
@@ -663,10 +659,19 @@ function updateMaxCtx() {
     return;
   }
   const W = model.sizeBytes + (mem?.wMmproj || 0) + (mem?.wDraft || 0);
+  const par = params.parallel || 1;
   let lo = 256, hi = 1048576, best = 0;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if ((W + perTok * mid * par + 2e9) / 1e9 <= budget) {
+    const kv = kvCacheBytes(model, {
+      ctx: mid,
+      parallel: par,
+      cacheTypeK: k,
+      cacheTypeV: v,
+      ubatch: params.ubatch,
+      swaFull: params.swaFull,
+    });
+    if ((W + kv + 2e9) / 1e9 <= budget) {
       best = mid;
       lo = mid + 1;
     } else hi = mid - 1;
@@ -699,7 +704,10 @@ function computeHints() {
     });
   }
   if (p.parallel > 1) {
-    hints.push({ level: 'info', text: `并行序列 = ${p.parallel}：KV 缓存内存 ×${p.parallel}，上下文与内存预算需同步考虑。` });
+    hints.push({
+      level: 'info',
+      text: `并行序列 = ${p.parallel}：上下文按槽均分（每槽 ≈ ctx ÷ ${p.parallel}），KV 池总量不变；单用户建议保持 1。`,
+    });
   }
   if (hw?.pCores > 0 && p.threads > hw.pCores) {
     hints.push({ level: 'info', text: `生成线程 ${p.threads} 超过 P 核数（${hw.pCores}）：Apple Silicon 上 E 核对逐 token 生成贡献有限。` });
