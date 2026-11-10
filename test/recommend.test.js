@@ -9,6 +9,7 @@ const {
   recommend,
   companionBytes,
 } = require('../main/recommend');
+const { buildArgs } = require('../shared/args');
 
 // M5 Max 64GB
 const HW = {
@@ -179,4 +180,42 @@ test('recommend：小模型不触发 MoE 卸载', () => {
   const tiny = { ...DENSE, sizeBytes: 2e9, sizeGB: 2, isMoe: true, expertCount: 32 };
   const { params } = recommend({ hw: HW, model: tiny });
   assert.equal(params.nCpuMoe, 0, '2GB < 0.6×51.2GB');
+});
+
+test('recommend：补齐推理/检查点/cache-ram 默认值，一键配置不新增任何 flag', () => {
+  const { params } = recommend({ hw: HW, model: DENSE });
+  const expected = {
+    reasoning: 'auto', reasoningFormat: 'auto', reasoningEffort: 'default',
+    reasoningBudget: -1, reasoningBudgetMessage: '', reasoningPreserve: true,
+    ctxCheckpoints: 32, checkpointMinStep: 8192, cacheRam: 8192,
+  };
+  for (const [k, v] of Object.entries(expected)) {
+    assert.equal(params[k], v, `${k} 应为引擎默认值`);
+  }
+  const a = buildArgs(params, DENSE.path, 'server');
+  for (const f of ['--reasoning', '--reasoning-format', '--reasoning-effort', '--reasoning-budget', '--reasoning-budget-message', '--no-reasoning-preserve', '-ctxcp', '-cms', '-cram']) {
+    assert.ok(!a.includes(f), `默认值不应下发 ${f}`);
+  }
+});
+
+test('recommend：moeCacheCpuShare / connect 默认关闭，一键配置不新增 flag', () => {
+  const { params } = recommend({ hw: HW, model: DENSE });
+  assert.equal(params.moeCacheCpuShare, 0, 'moeCacheCpuShare 默认 0');
+  assert.equal(params.connect, false, 'connect 默认 false');
+  assert.equal(params.connectCode, '', 'connectCode 默认空');
+  const a = buildArgs(params, DENSE.path, 'server');
+  for (const f of ['--moe-cache-cpu-share', '--connect', '--connect-code']) {
+    assert.ok(!a.includes(f), `默认值不应下发 ${f}`);
+  }
+});
+
+test('recommend：Wave2 卸载参数默认关闭，一键配置不新增 flag', () => {  const { params } = recommend({ hw: HW, model: DENSE });
+  assert.equal(params.moeCacheMib, 0, 'moeCacheMib 默认 0');
+  assert.equal(params.nCpuFfn, 0, 'nCpuFfn 默认 0');
+  assert.equal(params.specDraftCpuMoe, false, 'specDraftCpuMoe 默认 false');
+  assert.equal(params.specDraftNCpuMoe, 0, 'specDraftNCpuMoe 默认 0');
+  const a = buildArgs(params, DENSE.path, 'server');
+  for (const f of ['--moe-cache-mib', '-ncffn', '--spec-draft-cpu-moe', '--spec-draft-n-cpu-moe']) {
+    assert.ok(!a.includes(f), `默认值不应下发 ${f}`);
+  }
 });

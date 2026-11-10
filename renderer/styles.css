@@ -15,6 +15,7 @@
   --cpu: #a371f7;
   --kv: #d29922;
   --comp: #6e7681;
+  --moecache: #f778ba;
   --free: #21262d;
 }
 * { box-sizing: border-box; }
@@ -393,6 +394,7 @@ input[type="check"] { width: 17px; height: 17px; accent-color: var(--accent); cu
 .mem-bar .seg.cpu { background: var(--cpu); }
 .mem-bar .seg.kv { background: var(--kv); }
 .mem-bar .seg.comp { background: var(--comp); }
+.mem-bar .seg.moecache { background: var(--moecache); }
 .mem-legend { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; font-size: 11.5px; }
 .mem-legend .lg { display: flex; align-items: center; gap: 7px; }
 .mem-legend .dot { width: 9px; height: 9px; border-radius: 3px; }
@@ -808,6 +810,15 @@ input[type="check"] { width: 17px; height: 17px; accent-color: var(--accent); cu
   background: var(--bg3);
   background-size: cover;
   background-position: center;
+}
+/* 音视频附件没有缩略图，用类型徽标占位 */
+.chat-thumb .media-tag {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 11px;
+  color: var(--fg2);
 }
 .chat-thumb .x {
   position: absolute;

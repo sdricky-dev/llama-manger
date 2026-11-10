@@ -66,6 +66,9 @@ const KV_ELEM_BYTES = {
 // MoE 模型中专家(expert)权重占文件大小的近似比例
 const MOE_EXPERT_FRAC = 0.85;
 
+// 稠密模型每层 FFN(MLP) 权重占该层大小的近似比例（-ncffn 卸载用）
+const DENSE_FFN_FRAC = 0.65;
+
 function kvBytesPerToken(model, kType, vType) {
   const k = KV_ELEM_BYTES[kType] ?? 2.0;
   const v = KV_ELEM_BYTES[vType] ?? 2.0;
@@ -157,6 +160,12 @@ function memoryBreakdown({ model, params, hw }) {
   const kv = kvCacheBytes(model, params);
   const compute = hostComputeGB(params.batch) * 1e9;
   const attach = wMmproj + wDraft;
+  // MoE 专家留 CPU 时，--moe-cache-mib 在 GPU 侧额外预留一块热专家缓存（MiB→字节）。
+  // 仅当确有专家在 CPU（isMoe && nCpuMoe>0）且用户给了正数时才计；默认 0 不影响估算。
+  const moeCache =
+    model.isMoe && Number(params.nCpuMoe) > 0 && Number(params.moeCacheMib) > 0
+      ? Number(params.moeCacheMib) * 1024 * 1024
+      : 0;
 
   // ---------- 独立显卡（PC）：显存与内存分开算 ----------
   const vramTotal = Number(hw && hw.gpu && hw.gpu.vramGB) || 0;
@@ -171,13 +180,18 @@ function memoryBreakdown({ model, params, hw }) {
       const keep = Math.max(0, Math.min(Number(params.nCpuMoe) || 0, L)) / L;
       wVram -= W * MOE_EXPERT_FRAC * keep * frac;
     }
+    // 稠密：前 nCpuFfn 层的 FFN 权重留在内存（MoE 用 -ncmoe，这里互斥）
+    if (!model.isMoe && params.nCpuFfn > 0) {
+      const keep = Math.max(0, Math.min(Number(params.nCpuFfn) || 0, L)) / L;
+      wVram -= W * DENSE_FFN_FRAC * keep * frac;
+    }
     wVram = Math.max(0, wVram);
 
     const kvOnGpu = params.kvOffload !== false;
     const gpuCompute = 1.0e9;
     const vramWeights = wVram + attachOnGpu(params, model);
     const vramKv = kvOnGpu ? kv : 0;
-    const vramUsed = vramWeights + vramKv + gpuCompute;
+    const vramUsed = vramWeights + vramKv + gpuCompute + moeCache;
 
     const ramWeights = W - wVram;
     const ramKv = kvOnGpu ? 0 : kv;
@@ -205,7 +219,7 @@ function memoryBreakdown({ model, params, hw }) {
           swaFull: params.swaFull,
         });
         const okMid =
-          vramWeights + (kvOnGpu ? kvMid : 0) + gpuCompute <= vram &&
+          vramWeights + (kvOnGpu ? kvMid : 0) + gpuCompute + moeCache <= vram &&
           ramWeights + (kvOnGpu ? 0 : kvMid) + attachOnRam(params, model) + compute <= ramBudget;
         if (okMid) {
           maxCtx = mid;
@@ -218,6 +232,7 @@ function memoryBreakdown({ model, params, hw }) {
       mode: 'discrete',
       kv,
       compute,
+      moeCache,
       maxCtx,
       wGpu: vramWeights,
       wCpu: ramWeights,
@@ -228,6 +243,7 @@ function memoryBreakdown({ model, params, hw }) {
         weights: vramWeights,
         kv: vramKv,
         compute: gpuCompute,
+        moeCache,
         used: vramUsed,
         free: freeVram,
         ok: freeVram >= 0,
@@ -241,7 +257,7 @@ function memoryBreakdown({ model, params, hw }) {
         free: freeRam,
         ok: freeRam >= 0,
       },
-      total: W + attach + kv + compute + gpuCompute,
+      total: W + attach + kv + compute + gpuCompute + moeCache,
       usable: ramBudget,
       free: Math.min(freeVram, freeRam),
       ok: freeVram >= 0 && freeRam >= 0,
@@ -258,10 +274,15 @@ function memoryBreakdown({ model, params, hw }) {
     const frac =
       params.ngl === 'all' ? 1 : Math.max(0, Math.min(Number(params.ngl) || 0, L)) / L;
     wGpu = W * frac;
+    // 稠密：前 nCpuFfn 层 FFN 权重留内存池（统一内存下改 GPU/CPU 占比，总量不变）
+    if (params.nCpuFfn > 0) {
+      const keep = Math.max(0, Math.min(Number(params.nCpuFfn) || 0, L)) / L;
+      wGpu = Math.max(0, wGpu - W * DENSE_FFN_FRAC * keep * frac);
+    }
   }
   const wCpu = W - wGpu;
   const usable = usableRamGB(hw) * 1e9;
-  const total = W + attach + kv + compute;
+  const total = W + attach + kv + compute + moeCache;
   const free = usable - total;
   return {
     mode: 'unified',
@@ -269,6 +290,7 @@ function memoryBreakdown({ model, params, hw }) {
     wCpu,
     kv,
     compute,
+    moeCache,
     wMmproj,
     wDraft,
     total,
@@ -287,12 +309,23 @@ function attachOnGpu(params, model) {
   if (mm && params.mmprojOffload !== false) gpu += mm.sizeBytes;
   const dr = (c.draft || []).find((x) => x.path === params.specDraft);
   if (dr) {
-    gpu +=
-      params.specDraftNgl === 'all' || params.specDraftNgl === undefined || params.specDraftNgl === ''
-        ? dr.sizeBytes
-        : 0;
+    const onGpu =
+      params.specDraftNgl === 'all' || params.specDraftNgl === undefined || params.specDraftNgl === '';
+    // 草稿专家留 CPU（--spec-draft-cpu-moe / -ncmoe-draft）时，这部分权重不在显存
+    if (onGpu) gpu += dr.sizeBytes * (1 - draftCpuExpertFrac(params, dr));
   }
   return gpu;
+}
+
+/** 草稿模型专家留 CPU 的比例（--spec-draft-cpu-moe / --spec-draft-n-cpu-moe） */
+function draftCpuExpertFrac(params, dr) {
+  if (params.specDraftCpuMoe) return MOE_EXPERT_FRAC;
+  const K = Number(params.specDraftNCpuMoe) || 0;
+  if (K > 0) {
+    const dl = dr && dr.nLayer ? dr.nLayer : 1;
+    return MOE_EXPERT_FRAC * (Math.min(K, dl) / dl);
+  }
+  return 0;
 }
 
 /** 附属文件在内存侧的大小 */
@@ -306,6 +339,7 @@ function attachOnRam(params, model) {
     const onGpu =
       params.specDraftNgl === 'all' || params.specDraftNgl === undefined || params.specDraftNgl === '';
     if (!onGpu) ram += dr.sizeBytes;
+    else ram += dr.sizeBytes * draftCpuExpertFrac(params, dr);
   }
   return ram;
 }
@@ -698,6 +732,9 @@ function recommend({ hw, model, params: curParams }) {
     ngl,
     cpuMoe: false,
     nCpuMoe,
+    moeCacheMib: 0,
+    moeCacheCpuShare: 0,
+    nCpuFfn: 0,
     kvOffload: plan ? plan.kvOffload : true, // false → --no-kv-offload（KV 放内存）
     flashAttn: 'on',
     ctx,
@@ -710,6 +747,8 @@ function recommend({ hw, model, params: curParams }) {
     mmprojOffload: true,
     specDraft: curParams ? curParams.specDraft || '' : (model.companions?.draft?.[0]?.path || ''),
     specDraftNgl: 'all',
+    specDraftCpuMoe: false,
+    specDraftNCpuMoe: 0,
     specType,
     // 性能
     threads: hw.pCores > 0 ? hw.pCores : 1,
@@ -723,6 +762,13 @@ function recommend({ hw, model, params: curParams }) {
     minP: 0.05,
     repeatPenalty: 1.1,
     seed: -1,
+    // 推理/思考（保持引擎默认，一键配置不新增 flag）
+    reasoning: 'auto',
+    reasoningFormat: 'auto',
+    reasoningEffort: 'default',
+    reasoningBudget: -1,
+    reasoningBudgetMessage: '',
+    reasoningPreserve: true,
     // 高级（mlock/mmap/dio 已合并为 loadMode，上游只认 -lm/--load-mode）
     ropeScaling,
     yarnOrigCtx,
@@ -735,11 +781,17 @@ function recommend({ hw, model, params: curParams }) {
     mirostat: 0,
     mirostatLr: 0.1,
     ignoreEos: false,
+    // 上下文检查点 / 主机内存 prompt cache（保持引擎默认）
+    ctxCheckpoints: 32,
+    checkpointMinStep: 8192,
+    cacheRam: 8192,
     // server
     host: '127.0.0.1',
     port: 9931,
     apiKey: '',
     metrics: false,
+    connect: false,
+    connectCode: '',
   };
 
   return { params, notes, ropeSuggested };
@@ -749,6 +801,7 @@ module.exports = {
   CTX_PRESETS,
   KV_ELEM_BYTES,
   MOE_EXPERT_FRAC,
+  DENSE_FFN_FRAC,
   KV_FALLBACK,
   AUTO_SLOTS,
   padCells,

@@ -67,8 +67,12 @@ contextBridge.exposeInMainWorld('lm', {
     autoApprove: (v) => ipcRenderer.invoke('agent:auto-approve', v),
   },
   mmIpc: {
-    pick: () => ipcRenderer.invoke('mm:pick-images'),
+    pick: () => ipcRenderer.invoke('mm:pick-files'),
     encode: (paths) => ipcRenderer.invoke('mm:encode-files', paths),
+  },
+  audio: {
+    // /tts 请求体：由主进程用 shared/audio.js 构造（唯一契约来源）
+    ttsBody: (o) => ipcRenderer.invoke('audio:tts-body', o),
   },
   sessions: {
     list: () => ipcRenderer.invoke('sessions:list'),

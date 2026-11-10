@@ -247,3 +247,121 @@ test('tools：引擎不认识的名字（get_datetime / http_fetch）被过滤�
 test('tools：cli 模式不下发 --tools', () => {
   assert.ok(!buildArgs({ ...BASE, tools: 'all' }, '/tmp/m.gguf', 'cli').includes('--tools'));
 });
+
+// ---------- 推理/思考控制（上游 --reasoning* 系列，cli + server 均支持） ----------
+
+test('reasoning：auto / 未设置时不下发（引擎默认 auto）', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--reasoning'));
+  assert.ok(!buildArgs({ ...BASE, reasoning: 'auto' }, '/tmp/m.gguf', 'cli').includes('--reasoning'));
+});
+
+test('reasoning：on / off 下发，cli 与 server 都支持', () => {
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoning: 'on' }, '/tmp/m.gguf', 'server'), '--reasoning', 'on'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoning: 'off' }, '/tmp/m.gguf', 'cli'), '--reasoning', 'off'));
+});
+
+test('reasoningFormat：auto / 未设置时不下发；显式格式才下发', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--reasoning-format'));
+  assert.ok(!buildArgs({ ...BASE, reasoningFormat: 'auto' }, '/tmp/m.gguf', 'server').includes('--reasoning-format'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoningFormat: 'none' }, '/tmp/m.gguf', 'cli'), '--reasoning-format', 'none'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoningFormat: 'deepseek-legacy' }, '/tmp/m.gguf', 'server'), '--reasoning-format', 'deepseek-legacy'));
+});
+
+test('reasoningEffort：default / 未设置时不下发；显式级别才下发', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--reasoning-effort'));
+  assert.ok(!buildArgs({ ...BASE, reasoningEffort: 'default' }, '/tmp/m.gguf', 'server').includes('--reasoning-effort'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoningEffort: 'high' }, '/tmp/m.gguf', 'cli'), '--reasoning-effort', 'high'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoningEffort: 'minimal' }, '/tmp/m.gguf', 'server'), '--reasoning-effort', 'minimal'));
+});
+
+test('reasoningBudget：-1 / 未设置时不下发；0（立即结束）与正数都下发', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--reasoning-budget'));
+  assert.ok(!buildArgs({ ...BASE, reasoningBudget: -1 }, '/tmp/m.gguf', 'server').includes('--reasoning-budget'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoningBudget: 0 }, '/tmp/m.gguf', 'cli'), '--reasoning-budget', '0'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoningBudget: 1024 }, '/tmp/m.gguf', 'server'), '--reasoning-budget', '1024'));
+});
+
+test('reasoningBudgetMessage：空 / 未设置时不下发；非空才下发', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--reasoning-budget-message'));
+  assert.ok(!buildArgs({ ...BASE, reasoningBudgetMessage: '' }, '/tmp/m.gguf', 'server').includes('--reasoning-budget-message'));
+  assert.ok(hasPair(buildArgs({ ...BASE, reasoningBudgetMessage: '请总结' }, '/tmp/m.gguf', 'cli'), '--reasoning-budget-message', '请总结'));
+});
+
+test('reasoningPreserve：默认 true 不下发（引擎默认保留）；false 下发否定 flag', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--reasoning-preserve'));
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--no-reasoning-preserve'));
+  assert.ok(!buildArgs({ ...BASE, reasoningPreserve: true }, '/tmp/m.gguf', 'cli').includes('--no-reasoning-preserve'));
+  const a = buildArgs({ ...BASE, reasoningPreserve: false }, '/tmp/m.gguf', 'server');
+  assert.ok(a.includes('--no-reasoning-preserve'), 'false 应下发 --no-reasoning-preserve');
+  assert.ok(!a.includes('--reasoning-preserve'), '不应下发肯定 flag');
+});
+
+// ---------- 上下文检查点 / 主机内存提示缓存（-ctxcp / -cms / -cram） ----------
+
+test('ctxCheckpoints：默认 32 / 未设置时不下发；0（禁用）与改值都下发，cli+server', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('-ctxcp'));
+  assert.ok(!buildArgs({ ...BASE, ctxCheckpoints: 32 }, '/tmp/m.gguf', 'server').includes('-ctxcp'));
+  assert.ok(hasPair(buildArgs({ ...BASE, ctxCheckpoints: 0 }, '/tmp/m.gguf', 'cli'), '-ctxcp', '0'));
+  assert.ok(hasPair(buildArgs({ ...BASE, ctxCheckpoints: 16 }, '/tmp/m.gguf', 'server'), '-ctxcp', '16'));
+});
+
+test('checkpointMinStep：默认 8192 / 未设置时不下发；改值下发，但仅 server（cli 不支持）', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('-cms'));
+  assert.ok(!buildArgs({ ...BASE, checkpointMinStep: 8192 }, '/tmp/m.gguf', 'server').includes('-cms'));
+  assert.ok(hasPair(buildArgs({ ...BASE, checkpointMinStep: 0 }, '/tmp/m.gguf', 'server'), '-cms', '0'));
+  assert.ok(hasPair(buildArgs({ ...BASE, checkpointMinStep: 4096 }, '/tmp/m.gguf', 'server'), '-cms', '4096'));
+  assert.ok(!buildArgs({ ...BASE, checkpointMinStep: 4096 }, '/tmp/m.gguf', 'cli').includes('-cms'), 'cli 模式不能下发 -cms');
+});
+
+test('cacheRam：默认 8192 / 未设置时不下发；0（禁用）/-1（不限）/改值都下发，cli+server', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('-cram'));
+  assert.ok(!buildArgs({ ...BASE, cacheRam: 8192 }, '/tmp/m.gguf', 'server').includes('-cram'));
+  assert.ok(hasPair(buildArgs({ ...BASE, cacheRam: 0 }, '/tmp/m.gguf', 'cli'), '-cram', '0'));
+  assert.ok(hasPair(buildArgs({ ...BASE, cacheRam: -1 }, '/tmp/m.gguf', 'server'), '-cram', '-1'));
+  assert.ok(hasPair(buildArgs({ ...BASE, cacheRam: 16384 }, '/tmp/m.gguf', 'server'), '-cram', '16384'));
+});
+
+test('moeCacheMib：默认 0 / 未设置时不下发；正数下发 --moe-cache-mib，cli+server', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--moe-cache-mib'));
+  assert.ok(!buildArgs({ ...BASE, moeCacheMib: 0 }, '/tmp/m.gguf', 'cli').includes('--moe-cache-mib'));
+  assert.ok(hasPair(buildArgs({ ...BASE, moeCacheMib: 1024 }, '/tmp/m.gguf', 'cli'), '--moe-cache-mib', '1024'));
+  assert.ok(hasPair(buildArgs({ ...BASE, moeCacheMib: 2048 }, '/tmp/m.gguf', 'server'), '--moe-cache-mib', '2048'));
+});
+
+test('moeCacheCpuShare：默认 0 / 未设置时不下发；0<比例≤1 下发 --moe-cache-cpu-share，cli+server', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--moe-cache-cpu-share'));
+  assert.ok(!buildArgs({ ...BASE, moeCacheCpuShare: 0 }, '/tmp/m.gguf', 'cli').includes('--moe-cache-cpu-share'));
+  assert.ok(hasPair(buildArgs({ ...BASE, moeCacheCpuShare: 0.5 }, '/tmp/m.gguf', 'cli'), '--moe-cache-cpu-share', '0.5'));
+  assert.ok(hasPair(buildArgs({ ...BASE, moeCacheCpuShare: 0.95 }, '/tmp/m.gguf', 'server'), '--moe-cache-cpu-share', '0.95'));
+});
+
+test('nCpuFfn：默认 0 / 未设置时不下发；正数下发 -ncffn，cli+server', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('-ncffn'));
+  assert.ok(!buildArgs({ ...BASE, nCpuFfn: 0 }, '/tmp/m.gguf', 'cli').includes('-ncffn'));
+  assert.ok(hasPair(buildArgs({ ...BASE, nCpuFfn: 16 }, '/tmp/m.gguf', 'cli'), '-ncffn', '16'));
+  assert.ok(hasPair(buildArgs({ ...BASE, nCpuFfn: 32 }, '/tmp/m.gguf', 'server'), '-ncffn', '32'));
+});
+
+test('specDraftCpuMoe / specDraftNCpuMoe：仅在有草稿时下发，默认省略', () => {
+  assert.ok(!buildArgs({ ...BASE, specDraftCpuMoe: true }, '/tmp/m.gguf', 'cli').includes('--spec-draft-cpu-moe'), '无草稿不下发');
+  assert.ok(buildArgs({ ...BASE, specDraft: '/tmp/d.gguf', specDraftCpuMoe: true }, '/tmp/m.gguf', 'cli').includes('--spec-draft-cpu-moe'));
+  assert.ok(hasPair(buildArgs({ ...BASE, specDraft: '/tmp/d.gguf', specDraftNCpuMoe: 8 }, '/tmp/m.gguf', 'cli'), '--spec-draft-n-cpu-moe', '8'));
+  assert.ok(!buildArgs({ ...BASE, specDraft: '/tmp/d.gguf' }, '/tmp/m.gguf', 'cli').includes('--spec-draft-cpu-moe'), '默认关不下发');
+  assert.ok(!buildArgs({ ...BASE, specDraft: '/tmp/d.gguf' }, '/tmp/m.gguf', 'cli').includes('--spec-draft-n-cpu-moe'), '默认 0 不下发');
+});
+
+test('mediaPath：默认不下发；显式设置时仅 server 下发 --media-path', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--media-path'));
+  assert.ok(!buildArgs({ ...BASE, mediaPath: '' }, '/tmp/m.gguf', 'server').includes('--media-path'));
+  assert.ok(!buildArgs({ ...BASE, mediaPath: '/tmp/media' }, '/tmp/m.gguf', 'cli').includes('--media-path'), 'cli 模式不支持');
+  assert.ok(hasPair(buildArgs({ ...BASE, mediaPath: '/tmp/media' }, '/tmp/m.gguf', 'server'), '--media-path', '/tmp/media'));
+});
+
+test('connect / connectCode：默认不下发；--connect 仅 server，code 只在开启隧道时下发', () => {
+  assert.ok(!buildArgs(BASE, '/tmp/m.gguf', 'server').includes('--connect'));
+  assert.ok(buildArgs({ ...BASE, connect: true }, '/tmp/m.gguf', 'server').includes('--connect'));
+  assert.ok(!buildArgs({ ...BASE, connect: true }, '/tmp/m.gguf', 'cli').includes('--connect'), 'cli 不支持');
+  const code = 'A'.repeat(40);
+  assert.ok(hasPair(buildArgs({ ...BASE, connect: true, connectCode: code }, '/tmp/m.gguf', 'server'), '--connect-code', code));
+  assert.ok(!buildArgs({ ...BASE, connectCode: code }, '/tmp/m.gguf', 'server').includes('--connect-code'), '未开隧道时 code 不下发');
+});

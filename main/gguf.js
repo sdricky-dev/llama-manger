@@ -47,6 +47,7 @@ const DRAFT_ARCHES = new Set(['dflash', 'eagle3', 'eagle', 'dspark', 'medusa']);
 const DECISION_TYPES = [
   'openjev', 'lev', 'kev', 'nimble', 'laya', 'clef', 'pplx-decider',
   'vllm-decision2', 'vllm-d3', 'lfm2-d1', 'lfm2-d1-omni', 'granite-switch',
+  'h2o-lightning', 'lfm3-d1', 'lfm3-d1-omni', 'openbmb-minicpm-ocr-jev',
 ];
 
 // 别名：需引擎侧打补丁（scripts/patches/decision-type-jev-alias.patch）才被接受。

@@ -213,7 +213,8 @@
           <div id="chatThumbs" class="chat-thumbs hidden"></div>
           <textarea id="chatText" rows="2" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
           <div class="chat-btns">
-            <button id="btnChatImage" class="btn ghost" title="附加图片（需要模型支持视觉：自动配对 mmproj）">📎 图片</button>
+            <button id="btnChatAttach" class="btn ghost" title="附加图片 / 音频 / 视频（需要模型配 mmproj）">📎 附件</button>
+            <button id="btnChatSpeak" class="btn ghost" title="用当前模型朗读最后一条回复（POST /tts，需要 TTS 模型）">🔊 朗读</button>
             <button id="btnChatSend" class="btn primary">发送</button>
             <button id="btnChatStop" class="btn ghost" disabled>停止</button>
             <button id="btnChatClear" class="btn ghost">清空</button>

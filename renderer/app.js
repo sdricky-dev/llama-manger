@@ -564,6 +564,7 @@ function renderMem() {
         ['gpu', side.weights],
         ['kv', side.kv],
         ['comp', side.compute],
+        ['moecache', side.moeCache || 0],
       ];
       return `<div class="memrow">
         <div class="memrow-label">${label} <b>${gb(side.used)} / ${gb(side.total)}</b></div>
@@ -580,6 +581,7 @@ function renderMem() {
       ['var(--kv)', `KV 缓存（${m.vram.kv > 0 ? '显存' : '内存'}）`, m.vram.kv || m.ram.kv],
       ['var(--cpu)', '权重（内存）', m.ram.weights],
       ['var(--comp)', '计算缓冲', m.vram.compute + m.ram.compute],
+      ...(m.vram.moeCache > 0 ? [['var(--moecache)', 'MoE 专家缓存', m.vram.moeCache]] : []),
       ['var(--free)', '两侧较小余量', Math.max(0, m.free)],
     ]
       .map(([c, label, v]) => `<div class="lg"><span class="dot" style="background:${c}"></span>${label}<b>${gb(v)} GB</b></div>`)
@@ -602,6 +604,7 @@ function renderMem() {
     ['cpu', m.wCpu],
     ['kv', m.kv],
     ['comp', m.compute],
+    ['moecache', m.moeCache || 0],
   ];
   $('memBar').className = 'mem-bar';
   $('memBar').innerHTML = segs
@@ -612,6 +615,7 @@ function renderMem() {
     ['var(--cpu)', '内存池权重', m.wCpu],
     ['var(--kv)', 'KV 缓存', m.kv],
     ['var(--comp)', '计算缓冲', m.compute],
+    ...(m.moeCache > 0 ? [['var(--moecache)', 'MoE 专家缓存', m.moeCache]] : []),
     ['var(--free)', '空闲', Math.max(0, m.free)],
   ];
   // 附属文件计入的额外常驻内存（已包含在 GPU/内存池权重里）
@@ -940,24 +944,35 @@ function buildChatRequestBody(style) {
 
 /**
  * 用已编码好的 data URI 拼 OpenAI 多模态 user 消息。
- * 图片在选图时已由主进程 `mm:encode-files` 编码成 data URI，
+ * 附件在选中时已由主进程 `mm:encode-files` 编码成 data URI（含 kind），
  * 这里不再需要读盘（preload 在沙箱里也拿不到 fs）。
+ * content part 形状与上游 server-common.cpp oaicompat_content_load_media 一致：
+ *   图片 image_url.url / 音频 input_audio.data / 视频 input_video.data
  */
-function buildMultimodalMessage(text, images) {
-  const ok = (images || []).filter((im) => im && im.dataUri);
+const MEDIA_PART = {
+  image: (u) => ({ type: 'image_url', image_url: { url: u } }),
+  audio: (u) => ({ type: 'input_audio', input_audio: { data: u } }),
+  video: (u) => ({ type: 'input_video', input_video: { data: u } }),
+};
+
+function buildMultimodalMessage(text, media) {
+  const ok = (media || []).filter((m) => m && m.dataUri);
   if (!ok.length) return { role: 'user', content: String(text || '') };
   const parts = [];
   if (text) parts.push({ type: 'text', text: String(text) });
-  for (const im of ok) parts.push({ type: 'image_url', image_url: { url: im.dataUri } });
+  for (const m of ok) {
+    const build = MEDIA_PART[m.kind] || MEDIA_PART.image;
+    parts.push(build(m.dataUri));
+  }
   return { role: 'user', content: parts };
 }
 
 function buildOpenAiBase() {
-  // 处理最后一条 user 消息：若有待发送图片，把它升级为 multimodal content
+  // 处理最后一条 user 消息：若有待发送附件，把它升级为 multimodal content
   const messages = state.chatHistory.slice();
-  if (chatImages.length && messages.length && messages[messages.length - 1].role === 'user') {
+  if (chatMedia.length && messages.length && messages[messages.length - 1].role === 'user') {
     const last = messages[messages.length - 1];
-    messages[messages.length - 1] = buildMultimodalMessage(last.content, chatImages);
+    messages[messages.length - 1] = buildMultimodalMessage(last.content, chatMedia);
   }
   return {
     model: state.model?.path,
@@ -1152,45 +1167,53 @@ function summarizeArgs(args) {
   return parts.join(', ');
 }
 
-/* ---------------- 多模态图片 ---------------- */
-let chatImages = []; // [{ path, mime, dataUri, sizeBytes }]
+/* ---------------- 多模态附件（图片 / 音频 / 视频） ---------------- */
+let chatMedia = []; // [{ path, kind, mime, dataUri, sizeBytes }]
+
+const MEDIA_ICON = { image: '🖼', audio: '🎧', video: '🎬' };
 
 function renderThumbs() {
   const box = $('chatThumbs');
   if (!box) return;
-  if (!chatImages.length) {
+  if (!chatMedia.length) {
     box.classList.add('hidden');
     box.innerHTML = '';
     return;
   }
   box.classList.remove('hidden');
-  box.innerHTML = chatImages.map((img, i) => `
-    <div class="chat-thumb" data-i="${i}" style="background-image:url('${img.dataUri}')" title="${esc(img.path)} (${(img.sizeBytes/1024).toFixed(0)} KB)">
+  box.innerHTML = chatMedia.map((m, i) => {
+    const tip = `${esc(m.path)} (${(m.sizeBytes / 1024).toFixed(0)} KB)`;
+    const isImage = !m.kind || m.kind === 'image';
+    // 图片用缩略图背景；音视频显示类型徽标（浏览器不会把音频 data URI 当图片渲染）
+    const head = isImage
+      ? ` style="background-image:url('${m.dataUri}')"`
+      : `><span class="media-tag">${MEDIA_ICON[m.kind] || '📎'} ${esc((m.mime || '').split('/')[1] || '')}</span`;
+    return `<div class="chat-thumb" data-i="${i}"${head} title="${tip}">
       <button class="x" data-rm="${i}" title="移除">×</button>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
   box.querySelectorAll('.x').forEach((b) => {
     b.onclick = () => {
-      chatImages.splice(Number(b.dataset.rm), 1);
+      chatMedia.splice(Number(b.dataset.rm), 1);
       renderThumbs();
     };
   });
 }
 
-async function pickImages() {
+async function pickMedia() {
   const paths = await api.mmIpc.pick();
   if (!paths.length) return;
   const results = await api.mmIpc.encode(paths);
   const ok = results.filter((r) => r && r.ok);
   const bad = results.filter((r) => r && !r.ok);
   for (const r of ok) {
-    if (chatImages.length >= 4) {
-      toast('最多附加 4 张图片', 'bad');
+    if (chatMedia.length >= 4) {
+      toast('最多附加 4 个文件', 'bad');
       break;
     }
-    chatImages.push({ path: paths[results.indexOf(r)], mime: r.mime, dataUri: r.dataUri, sizeBytes: r.sizeBytes });
+    chatMedia.push({ path: paths[results.indexOf(r)], kind: r.kind || 'image', mime: r.mime, dataUri: r.dataUri, sizeBytes: r.sizeBytes });
   }
-  if (bad.length) toast(`${bad.length} 张图片加载失败：${bad[0].error}`, 'bad');
+  if (bad.length) toast(`${bad.length} 个文件加载失败：${bad[0].error}`, 'bad');
   renderThumbs();
   // 提示 mmproj 自动配对
   if (ok.length && state.model && !state.params.mmproj) {
@@ -1203,8 +1226,68 @@ async function pickImages() {
       saveConfig();
       toast(`已自动配对 mmproj: ${baseName(state.params.mmproj)}`, 'ok');
     } else {
-      toast('当前模型没附带 mmproj，发图也不会被处理', 'bad');
+      toast('当前模型没附带 mmproj，发附件也不会被处理', 'bad');
     }
+  }
+}
+
+/* ---------------- 语音合成（上游 POST /tts） ----------------
+ * /tts 返回裸音频字节（默认 wav），不是 JSON；直接喂给 <audio> 播放即可。
+ * 需要当前服务的是带音频头的 TTS 模型（如 LFM3-Audio / Pocket TTS），
+ * 普通 LLM 上这个端点会报错，这里只做友好提示，不影响其它功能。 */
+let speakAudio = null;
+
+async function speakLastReply() {
+  const last = [...state.chatHistory].reverse().find((m) => m.role === 'assistant' && String(m.content || '').trim());
+  if (!last) {
+    toast('没有可朗读的回复', 'bad');
+    return;
+  }
+  if (!state.serverUrl) {
+    toast('请先启动 API 服务', 'bad');
+    return;
+  }
+  if (speakAudio) {
+    speakAudio.pause();
+    speakAudio = null;
+  }
+  const base = state.serverUrl.replace(/\/+$/, '');
+  const headers = { 'Content-Type': 'application/json' };
+  if (state.params.apiKey) headers['Authorization'] = `Bearer ${state.params.apiKey}`;
+  const btn = $('btnChatSpeak');
+  if (btn) { btn.disabled = true; btn.textContent = '🔊 合成中…'; }
+  try {
+    // 请求体统一由主进程的 shared/audio.js 构造（字段名、默认值省略规则都在那里，有单测覆盖）
+    const built = await api.audio.ttsBody({ input: String(last.content) });
+    if (!built || !built.ok) {
+      toast(`朗读失败：${(built && built.error) || '请求体构造出错'}`, 'bad');
+      return;
+    }
+    const r = await fetch(`${base}/tts`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(built.body),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => '');
+      toast(`朗读失败（${r.status}）：${(detail || '当前模型不支持 /tts').slice(0, 160)}`, 'bad');
+      return;
+    }
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const mime = (r.headers.get('Content-Type') || 'audio/wav').split(';')[0];
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    speakAudio = new Audio(url);
+    speakAudio.onended = () => {
+      URL.revokeObjectURL(url);
+      speakAudio = null;
+      if (btn) { btn.textContent = '🔊 朗读'; btn.disabled = false; }
+    };
+    await speakAudio.play();
+    if (btn) btn.textContent = '🔊 朗读中';
+  } catch (e) {
+    toast(`朗读请求出错：${e.message}`, 'bad');
+  } finally {
+    if (!speakAudio && btn) { btn.textContent = '🔊 朗读'; btn.disabled = false; }
   }
 }
 
@@ -1352,8 +1435,8 @@ async function chatSend() {
     $('btnChatSend').disabled = false;
     $('btnChatStop').disabled = true;
     updateAgentBadge('idle');
-    // 发送后清掉已用图片
-    chatImages = [];
+    // 发送后清掉已用附件
+    chatMedia = [];
     renderThumbs();
   }
 }
@@ -2053,10 +2136,11 @@ async function init() {
   $('btnChatClear').onclick = () => {
     $('chatMsgs').innerHTML = '';
     state.chatHistory = [];
-    chatImages = [];
+    chatMedia = [];
     renderThumbs();
   };
-  $('btnChatImage').onclick = pickImages;
+  $('btnChatAttach').onclick = pickMedia;
+  $('btnChatSpeak').onclick = speakLastReply;
   $('btnChatSave').onclick = saveCurrentSession;
   $('btnSessionsRefresh').onclick = refreshSessions;
   refreshSessions();

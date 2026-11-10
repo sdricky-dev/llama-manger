@@ -153,6 +153,14 @@ app.whenReady().then(() => {
   const { autoApproveSet } = require('../shared/agent');
   ipcMain.handle('agent:auto-approve', (_e, toolsArg) => Array.from(autoApproveSet(toolsArg)));
   ipcMain.handle('app:api-styles', () => require('../shared/anthropic').ANTHROPIC_API_STYLES);
+  // /tts 请求体由 shared/audio.js 统一构造（preload 沙箱不能 require，沿用主进程计算的约定）
+  ipcMain.handle('audio:tts-body', (_e, o) => {
+    try {
+      return { ok: true, body: require('../shared/audio').ttsRequest(o) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
   ipcMain.handle('agent:confirm', async (_e, { name, args, autoApproveList }) => {
     const isAuto = Array.isArray(autoApproveList) && autoApproveList.includes(name);
     if (isAuto) return { approved: true, auto: true };
@@ -170,13 +178,21 @@ app.whenReady().then(() => {
     return { approved: r.response === 1, auto: false };
   });
 
-  // ---------- 多模态：选择图片 ----------
-  ipcMain.handle('mm:pick-images', async () => {
+  // ---------- 多模态：选择附件（图片 / 音频 / 视频） ----------
+  ipcMain.handle('mm:pick-files', async () => {
     const r = await dialog.showOpenDialog(win, {
-      title: '选择图片（最多 4 张）',
+      title: '选择附件（图片 / 音频 / 视频，最多 4 个）',
       properties: ['openFile', 'multiSelections'],
       filters: [
-        { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] },
+        {
+          name: '多模态文件',
+          // 音频口径 = miniaudio(mp3/wav/flac)，视频口径 = 常见容器(交给 ffmpeg)
+          extensions: [
+            'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp',
+            'mp3', 'wav', 'flac',
+            'mp4', 'mov', 'mkv', 'webm', 'avi',
+          ],
+        },
       ],
     });
     return r.canceled ? [] : r.filePaths;
@@ -185,7 +201,7 @@ app.whenReady().then(() => {
   // ---------- 多模态：data URI 编码 ----------
   const mm = require('../shared/multimodal');
   ipcMain.handle('mm:encode-files', async (_e, paths) => {
-    return (Array.isArray(paths) ? paths : []).map((p) => mm.fileToDataUri(p));
+    return (Array.isArray(paths) ? paths : []).map((p) => mm.fileToMediaUri(p));
   });
 
   // ---------- 会话存档（轻量 JSONL） ----------

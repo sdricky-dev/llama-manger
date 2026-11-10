@@ -202,6 +202,29 @@ test('parseModelFile：支持的 decision 类型被判为可加载', () => {
   assert.equal(m.decisionTemplate, true);
 });
 
+test('parseModelFile：上游新增 decision 类型判为可加载（h2o-lightning/lfm3-d1/lfm3-d1-omni/openbmb-minicpm-ocr-jev）', () => {
+  const types = ['h2o-lightning', 'lfm3-d1', 'lfm3-d1-omni', 'openbmb-minicpm-ocr-jev'];
+  for (const t of types) {
+    const dir = tmpDir();
+    const p = path.join(dir, `judge-${t}.gguf`);
+    buildGguf(
+      {
+        arch: 'qwen35',
+        extraKv: {
+          'qwen35.decision.type': { type: 8, value: t },
+          'tokenizer.chat_template.systemone': { type: 8, value: 'tpl' },
+        },
+        tensors: [],
+      },
+      p
+    );
+    const m = parseModelFile(p);
+    assert.equal(m.decisionType, t, `${t}: decisionType`);
+    assert.equal(m.decisionSupported, true, `${t}: 应判为引擎支持`);
+    assert.equal(m.decisionAlias, null, `${t}: 不是别名`);
+  }
+});
+
 test('parseModelFile：未知 decision 类型 → 标记引擎不支持（加载会失败）', () => {
   const dir = tmpDir();
   const p = path.join(dir, 'judge-unknown.gguf');

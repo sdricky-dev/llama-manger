@@ -14,6 +14,7 @@ llama.cpp 一键启动器（Electron 桌面应用）。
 |---|---|
 | 硬件检测 | macOS：`sysctl`/`system_profiler`/`vm_stat`（芯片、P/E 核、Metal、可用内存）；Windows：PowerShell CIM + 注册表 `qwMemorySize`（**显存**、物理核）；Linux：`/proc` + `lscpu` + `nvidia-smi`/`rocm-smi` |
 | 显存感知推荐 | **PC（独立显卡）按「显存 + 内存」两笔账**规划：全量卸载 → KV 回内存 → MoE 专家留内存 → 部分卸载，并给出各自的余量；显存读不到时明确警告并交回引擎（ngl=auto） |
+| 细粒度权重卸载 | MoE 专家留 CPU 时可划一块显存做热专家缓存（`--moe-cache-mib`，内存面板单列计入显存），缓存满后未命中的专家可按比例交给 CPU 本地计算（`--moe-cache-cpu-share`，适合大内存 / PCIe 4.0+，可用上游 `scripts/moe-cache-tune.py` 实测最佳比例）；稠密模型可把前 N 层 FFN 权重留 CPU（`-ncffn`）腾显存（每层 FFN 约 65%）；MoE 草稿模型可把专家权重留 CPU（`--spec-draft-cpu-moe` / `--spec-draft-n-cpu-moe`）——全部默认关闭、不改命令行，开启后都纳入内存估算 |
 | 模型扫描 | 目录递归找 `.gguf`，自研 GGUF v3 头解析（流式读，大文件不吃内存） |
 | 文件角色识别 | 读 `general.type` + 架构判定：**主模型 / mmproj 视觉投影 / 草稿(draft) 模型**。附属文件不再冒充独立模型，而是挂到同目录主模型上（👁 视觉投影 / ⚡ 草稿），选主模型时自动配对好 `-mm` / `-md` |
 | 量化实测 | 读 **tensor 表**按元素数加权推导真实量化（发布者的 `general.file_type` 经常写错，如 BF16 的 mmproj 标成 IQ3_S）；元数据不一致时界面标注"元数据 X 不准" |
@@ -25,7 +26,12 @@ llama.cpp 一键启动器（Electron 桌面应用）。
 | 视觉 / 加速 | `-mm` 视觉投影（默认 GPU 卸载）、`-md` 草稿模型 + `--spec-type`；**投机解码下拉框按当前模型能力过滤**：只有内置 MTP 或配套草稿模型时才列出 draft-*，ngram-* 恒可用，不可用项隐藏并在旁注明原因；**草稿有专用实现（dflash/eagle3/dspark）时禁用通用 `draft-simple` 并自动纠正已有取值**（选错会静默变慢，见「投机解码」节的实测表）；`--spec-draft-n-max` 与 `--spec-draft-n-ubatch` 可在高级选项里调，附实测拐点与省显存取舍说明 |
 | 启动 | server：进程托管 + 日志流 + 就绪检测 + 优雅停止；cli：生成脚本在 Terminal.app 打开（真实 TTY） |
 | 内嵌聊天 | OpenAI 兼容 `/v1/chat/completions` 流式对话，支持 API Key、中止、多轮；推理模型的思考内容以 💭 斜体单独展示；**请求固定 `id_slot`**，使这段上下文留在该 slot 里可被存盘 |
+| 推理/思考控制 | 推理模型可调 `--reasoning`（auto/on/off）、`--reasoning-format`（思考内容放 `reasoning_content` 还是留正文）、`--reasoning-effort`（思考强度）、`--reasoning-budget`（思考 token 预算）+ 收尾消息、`--no-reasoning-preserve`（是否保留历史思考轨迹）；默认全跟随引擎，不改不新增 flag |
 | 会话存盘 | `--slot-save-path` + `/slots/{id}?action=save\|restore\|erase`：把一段长会话（提示词缓存 + KV）整体存成磁盘文件，之后**秒级恢复、无需重新 prefill**。反复用同一份长文档（报告/代码库/合同）时最省时间；面板内可直接列出/恢复/删除存盘文件 |
+| P2P 隧道（实验） | server 可开 `--connect` 用 llama-connect 打一条点对点隧道，跨 NAT 从局域网外访问；连接码默认每次启动随机生成，也可用 `--connect-code` 固定 40 位码。实验性功能，默认关闭、不改变原命令行 |
+| 上下文检查点 | `--ctx-checkpoints`（每 slot 检查点数，默认 32）/ `--checkpoint-min-step`（最小间距，仅 server）/ `--cache-ram`（主机内存 prompt cache 上限 MiB）：检查点用于回退/分支/存盘，prompt cache 反复用同一长文档时省去重新 prefill；占系统内存、与 KV/显存无关，等于引擎默认值时不下发 |
+| 音频 / 视频输入 | 聊天附件不再只有图片：**mp3/wav/flac 走 `input_audio`（引擎用 miniaudio 解码），mp4/mov/mkv/webm/avi 走 `input_video`（交给 ffmpeg）**，消息构造与上游 `oaicompat_content_load_media` 逐字段对齐。大文件可在高级选项里设 `--media-path` 目录，请求体改用 `file://相对路径` 引用，不必把几十 MB base64 内联进去 |
+| 语音合成 / 实时转写 | 聊天工具栏「🔊 朗读」直接打 `POST /tts`（返回裸 wav 字节，喂给 `<audio>` 播放）；`shared/audio.js` 收口了 `/tts`、`/v1/audio/transcriptions`、WebSocket `/v1/realtime` 三套契约：请求体字段名、PCM16↔base64、wav 头编解码、客户端事件（`session.update`/`input_audio_buffer.append`/`commit`/`conversation.item.create`/`response.create`）与服务端事件归一化解析，全部纯函数、单测覆盖。需要带音频头的模型（LFM3-Audio / Pocket TTS 等）才有效果 |
 | 文件定位（右键） | **右键**模型卡片、卡片上的 👁/⚡ 附属标签、未配对文件标签或存盘文件 → 「在文件夹中显示（高亮文件）/ 打开所在文件夹 / 复制完整路径」；卡片右上角 `⋯` 是等价入口。核对"文件是不是齐了、路径对不对"时不用再去 Finder/资源管理器里翻目录 |
 | 基准测试 | 用 `llama-bench` 实测 prompt / 生成 TPS、TTFT 与 LocalScore；**可指定多个上下文深度（`-d 0,4096,16384`）和重复次数（`-r`）**，一次加载模型跑完所有深度，结果按深度逐行对比 —— 用来回答「这个模型开到 16K 上下文还剩多少速度」 |
 | M5 神经加速器哨兵 | 启动时用 `llama-bench` 做一次零模型探针（0.2s，不加载权重），从引擎日志里取 `has tensor`/GPU 名，界面显示「神经加速器 ✓」；在 M5 级芯片上若拿不到 Metal 4 tensor API 会红字告警（**实测 prefill 会掉约 2.8×**：2 310 vs 837 t/s）。这条路径是静默降级的，不主动检测根本发现不了 |
@@ -117,14 +123,14 @@ cmake --build ~/Documents/GitHub/llama.cpp/build --target llama-server llama-cli
 npm test
 ```
 
-`node:test` 单元测试（不依赖 Electron，当前 **437 项全绿**，CI 在 Node 22/24 上跑）：
+`node:test` 单元测试（不依赖 Electron，当前 **496 项全绿**，CI 在 Node 22/24 上跑）：
 
 - `test/gguf.test.js` — 合成 GGUF v3 文件（`test/helpers.js` 生成器）→ 解析器
-- `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示、KV 池口径（并行不放大）
+- `test/recommend.test.js` — 一键推荐：ctx 选择、MoE 卸载、q8_0 降级、YaRN 提示、KV 池口径（并行不放大）、reasoning/检查点新参数默认跟随引擎不新增 flag
 - `test/recommend-discrete.test.js` — PC 双预算规划（9 种显存/内存组合 + 规划器与内存面板口径一致性不变量）
-- `test/memory.test.js` — 内存模型：ngl 比例、KV 精度、并行池（总量不变）、超限判定
+- `test/memory.test.js` — 内存模型：ngl 比例、KV 精度、并行池（总量不变）、超限判定、**MoE 专家 GPU 缓存（`--moe-cache-mib` 单列计入 GPU 侧）、稠密 FFN 卸载（`-ncffn` 只作用于稠密模型）、草稿 MoE 卸载（专家权重从显存折到内存）**
 - `test/kv-geometry.test.js` — KV「哪些层、每层多大、多少 cells」：混合 SSM 的 recurrent 语义、MTP 层排除、`full_attention_interval` 兜底、gemma4 逐层 KV 头与 SWA 头维（与引擎日志对齐的 8704 MiB 校验）、**SWA 窗口缓存口径（GEV-26B 实测 1060 MiB / `-np 2` 760 MiB）、标量滑动窗口模式、并行池语义、渲染层与主进程口径一致性**
-- `test/args.test.js` — CLI 参数映射（对照 llama.cpp 源码核对过标志名；含已删除的 `--mlock/--mmap/-dio` 不再下发、`--tools read_only` 展开）
+- `test/args.test.js` — CLI 参数映射（对照 llama.cpp 源码核对过标志名；含已删除的 `--mlock/--mmap/-dio` 不再下发、`--tools read_only` 展开、reasoning 系列与检查点/cache-ram 的「等于引擎默认则省略」边界、`-cms` 仅 server、`--moe-cache-mib`/`--moe-cache-cpu-share`/`-ncffn`/`--spec-draft-cpu-moe`/`--spec-draft-n-cpu-moe` 默认省略、`--media-path` 仅 server、`--connect`/`--connect-code` 仅 server 且连接码需先开隧道）
 - `test/migrate.test.js` — 旧参数迁移：`--mmap/--mlock/-dio` → `--load-mode`（含 `loadMode:'auto'` 不吞掉旧字段）
 - `test/role.test.js` — 文件角色 / 量化实测 / decision 类型 / 附属文件归组
 - `test/spec.test.js` — 投机解码类型与模型能力的匹配矩阵
@@ -132,7 +138,8 @@ npm test
 - `test/slots.test.js` — 会话存盘的磁盘操作（文件名校验 / 列目录 / 删除 / 防路径穿越）
 - `test/sessions.test.js` — 会话存档 JSONL 读写与导出
 - `test/anthropic.test.js` — Anthropic Messages ↔ OpenAI Chat 适配层
-- `test/multimodal.test.js` — 图片 MIME 识别与多模态消息构造
+- `test/multimodal.test.js` — 多模态消息构造：图片 MIME 识别、音频（mp3/wav/flac）与视频（mp4/mov/mkv）分类、`input_audio`/`input_video` 的 `data` 与 `url` 分支、`file://` 本地引用（越界/不存在目录要拒绝）、单文件加载失败不致命
+- `test/audio.test.js` — 音频接口契约层：wav 头编解码（含附加 chunk 遍历与流式 size 收敛）、PCM16↔base64 往返、`/tts` 请求体（0 值必须下发、`voice` 与参考音频互斥）、`/v1/audio/transcriptions` 字段、`/v1/realtime` 客户端事件与服务端事件归一化
 - `test/bench.test.js` — llama-bench JSON 解析与 TTFT/吞吐提取；上下文深度解析（`4k` 写法 / 去重排序）、超训练上下文裁剪（`fitDepths`）、多深度分组汇总、`-d`/`-r` 参数下发
 - `test/hf.test.js` — HuggingFace 模型列表与下载
 - `test/sandbox.test.js` — 子进程沙箱能力探测与启用判定
@@ -315,4 +322,7 @@ Windows 构建引擎：
 - **Windows 尚未在真机验证**：显存检测（注册表 `qwMemorySize`）与 `launch.cmd` 启动路径的代码已完成并有单测，但要在真实 PC 上跑一遍才能确认；若显存读不到，应用会显示「未能检测到显卡显存」并把 `ngl` 交给引擎。
 - KV 精度字节数为块量化近似值（q8_0≈1.03B 等），估算误差 < 3%。
 - **文件定位的 Windows/Linux 表现尚未真机验证**（macOS 已实测：Finder 高亮文件 + 打开目录）：走的是 Electron `shell.showItemInFolder` / `shell.openPath`，路径解析逻辑已单测（`test/reveal.test.js`、`test/paths.test.js`）。
+- **音频链路（`/tts`、`/v1/realtime`、音视频附件）只有契约层被单测覆盖，端到端未实测**：本机的引擎二进制还是 10 月版本，里面既没有 `/v1/realtime` 也没有 `/tts` 路由，`e2e/` 脚本又需要装 Electron 才能跑。要验证需重新编译引擎 + 换带音频头的模型（LFM3-Audio / LFM3-Omni / Pocket TTS）。请求体与事件格式是照着上游 `server-common.cpp` / `server-realtime.cpp` / `tools/server/README.md` 逐字段对齐并写了断言的（`test/audio.test.js`、`test/multimodal.test.js`），所以"发出去的东西对不对"有保证，"引擎答得好不好"没有。
+- **P2P 隧道（`--connect`）未实测**：参数按上游源码接入并有单测，但隧道本身依赖 llama-connect 服务与公网环境，没有在真实跨 NAT 场景验证；同样受本机旧引擎限制（10 月构建还没有这个 flag）。
+- **上游 router 专属参数未接入**（`--models-max` / `--models-memory-margin` / `--models-autoload`）：本应用是单模型启动器，一次只托管一个模型，多模型动态加载/按内存卸载没有对应界面；需要这些行为请直接用 llama-server 的 router 模式。
 - 引擎为私有 fork（带 decision 模型支持）时，模型元数据里的 `*.decision.type` 必须在该构建的类型表内，应用只能预警、无法绕过。
